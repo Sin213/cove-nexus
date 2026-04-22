@@ -1,0 +1,84 @@
+{
+  "name": "cove-suite",
+  "version": "1.0.0",
+  "description": "The Cove Nexus — install, launch, and update every Cove tool from a single window.",
+  "main": "main.js",
+  "author": {
+    "name": "Sin",
+    "email": "79215527+Sin213@users.noreply.github.com"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/Sin213/cove-suite",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:linux": "electron-builder --linux",
+    "dist:win": "electron-builder --win",
+    "release": "electron-builder --linux --win --publish=always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9",
+    "isomorphic-git": "^1.37.5"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.sin.cove-suite",
+    "productName": "Cove Suite",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Sin213",
+        "repo": "cove-suite"
+      }
+    ],
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility",
+      "icon": "build/icon.png",
+      "artifactName": "Cove-Suite-${version}-${arch}.AppImage"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "portable": {
+      "artifactName": "Cove-Suite-${version}-Portable.exe"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "deleteAppDataOnUninstall": false,
+      "shortcutName": "Cove Suite",
+      "artifactName": "Cove-Suite-${version}-Setup.exe"
+    }
+  }
+}
