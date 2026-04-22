@@ -668,6 +668,24 @@ ipcMain.handle('cove:revealInstall', async (_e, slug) => {
   return { ok: false, error: 'missing' };
 });
 
+ipcMain.handle('cove:confirmUpdateAll', async (_e, names = []) => {
+  const list = Array.isArray(names) && names.length
+    ? names.map(n => `  • ${n}`).join('\n')
+    : '';
+  const { response } = await dialog.showMessageBox({
+    type: 'question',
+    buttons: ['Cancel', 'Update all'],
+    defaultId: 1,
+    cancelId: 0,
+    title: 'Update all',
+    message: `Update ${names.length} ${names.length === 1 ? 'program' : 'programs'}?`,
+    detail: list
+      ? `This will update every program listed below. If you don't want a specific one updated, cancel and use its card instead.\n\n${list}`
+      : `This will update every program that has an available update.`,
+  });
+  return { ok: response === 1 };
+});
+
 ipcMain.handle('cove:releases', async (_e, slug) => {
   if (!/^[a-z0-9][a-z0-9-]*$/i.test(slug)) return { ok: false, error: 'invalid slug' };
   try {

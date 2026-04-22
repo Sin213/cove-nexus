@@ -51,31 +51,49 @@
     });
   }
 
+  // Primary button: Install (not installed) or Launch (installed, regardless
+  // of whether an update is available — the Update button is separate so the
+  // user can launch the current version without first updating).
   function primaryButton(p) {
     const busy = state.busy[p.slug];
     const installed = isInstalled(p);
-    const update = hasUpdate(p);
 
-    if (busy === 'installing') return { label: 'Installing…', variant: 'primary', disabled: true, spin: true };
-    if (busy === 'launching')  return { label: 'Launching…',  variant: 'primary', disabled: true, spin: true };
-    if (busy === 'updating')   return { label: 'Updating…',   variant: 'primary', disabled: true, spin: true };
+    if (busy === 'installing') return { label: 'Installing…', disabled: true, spin: true };
+    if (busy === 'launching')  return { label: 'Launching…',  disabled: true, spin: true };
+    if (busy === 'updating')   return { label: 'Updating…',   disabled: true, spin: true };
+    if (!installed) return { label: 'Install', action: 'install' };
+    return { label: 'Launch', action: 'launch' };
+  }
 
-    if (!installed) return { label: 'Install', variant: 'primary', action: 'install' };
-    if (update)     return { label: 'Update',  variant: 'primary', action: 'update' };
-    return { label: 'Launch', variant: 'primary', action: 'launch' };
+  // Returns { kind: 'ok'|'update'|'none', text: string } for the status pill.
+  function statusFor(p) {
+    const installed = isInstalled(p);
+    if (!installed) return { kind: 'none', text: 'Not installed' };
+    const version = p.version ? `v${p.version.replace(/^v/, '')}` : 'installed';
+    return { kind: hasUpdate(p) ? 'update' : 'ok', text: version };
+  }
+
+  function escapeAttr(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   function card(p) {
     const installed = isInstalled(p);
     const update = hasUpdate(p);
     const btn = primaryButton(p);
+    const status = statusFor(p);
+    const busy = state.busy[p.slug];
 
-    const chips = [];
-    if (installed && !update) chips.push(`<span class="chip good"><span class="dot"></span>Installed</span>`);
-    if (!installed) chips.push(`<span class="chip"><span class="dot"></span>Not installed</span>`);
-    if (update) chips.push(`<span class="chip accent"><span class="dot"></span>${p.newVersion ? `Update · v${p.newVersion}` : 'Update available'}</span>`);
-    chips.push(`<span class="chip">${p.lang}</span>`);
-    chips.push(`<span class="chip">${categoryLabels[p.category] || ''}</span>`);
+    const categoryLabel = categoryLabels[p.category] || '';
+    const description = p.desc || '';
+
+    const updateBtnHtml = (installed && update && !busy)
+      ? `<button class="btn-update-icon" data-action="update" title="Update${p.latestTag ? ` to ${p.latestTag}` : ''}" aria-label="Update">
+           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+         </button>`
+      : '';
 
     return `
       <article class="card ${update ? 'pending' : ''}" data-slug="${p.slug}">
@@ -84,25 +102,20 @@
           <div class="card-title-row">
             <div class="row1">
               <h4>${p.name}</h4>
-              <button class="info-btn" aria-label="About ${p.name}" tabindex="0">
-                i
-                <span class="tip" role="tooltip">${p.desc}</span>
-              </button>
             </div>
-            <div class="slug">github.com/Sin213/${p.slug}</div>
           </div>
         </div>
 
-        <div class="card-meta">
-          ${chips.join('')}
-        </div>
+        ${categoryLabel ? `<div class="card-meta"><span class="chip">${categoryLabel}</span></div>` : ''}
+
+        <div class="card-desc" title="${escapeAttr(description)}">${description}</div>
 
         <div class="card-bottom">
-          <div class="timestamp">
-            <span style="color:var(--text-dim)">v${(update && p.newVersion) ? p.newVersion : (p.version || '—')}</span>
-            &nbsp;· Updated ${p.updated}
-          </div>
+          <span class="status-pill ${status.kind}" title="${status.kind === 'update' ? 'Update available' : status.kind === 'ok' ? 'Up to date' : 'Not installed'}">
+            <span class="dot"></span>${status.text}
+          </span>
           <div style="display:flex;gap:6px;align-items:center;">
+            ${updateBtnHtml}
             <button class="btn btn-sm btn-primary" data-action="${btn.action || ''}" ${btn.disabled ? 'disabled style="opacity:.6;cursor:default"' : ''}>
               ${btn.spin ? '<svg class="ico spin-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.55"/></svg>' : ''}
               ${btn.label}
@@ -322,8 +335,19 @@
     menu.id = 'card-menu';
     const installed = isInstalled(prog);
     const pinned = prog.pinnedTag || '';
+    // For Release notes, prefer the tag we'd land on next:
+    //   - hasUpdate → latestTag (what an Update would bring)
+    //   - installed, no update → current version (what you have)
+    //   - not installed → /releases/latest
+    const update = hasUpdate(prog);
+    const releaseTag = update ? (prog.latestTag || '') : (installed && prog.version ? `v${prog.version.replace(/^v/, '')}` : '');
+    const releaseUrl = releaseTag
+      ? `https://github.com/Sin213/${prog.slug}/releases/tag/${releaseTag}`
+      : `https://github.com/Sin213/${prog.slug}/releases/latest`;
+
     const items = [
       { label: 'Open GitHub', onClick: () => window.open(`https://github.com/Sin213/${prog.slug}`, '_blank') },
+      { label: 'Release notes', onClick: () => window.open(releaseUrl, '_blank') },
     ];
     if (IS_DESKTOP) {
       items.push({
@@ -557,6 +581,7 @@
         if (prog && row.manifest) applyManifest(prog, row.manifest);
         if (prog) {
           prog.pinnedTag = row.pinnedTag || '';
+          prog.latestTag = row.latestTag || '';
           prog.source = row.source || '';
           if (row.version) prog.version = row.version.replace(/^v/, '');
         }
@@ -709,6 +734,24 @@
       pinConfirm.textContent = 'Pin';
     }
   });
+  async function doUpdateAll() {
+    const updates = window.PROGRAMS.filter(hasUpdate);
+    if (!updates.length) return;
+    if (IS_DESKTOP) {
+      const names = updates.map(p => `${p.name}${p.latestTag ? ` → ${p.latestTag}` : ''}`);
+      const confirmed = await coveAPI.confirmUpdateAll(names);
+      if (!confirmed?.ok) return;
+    }
+    // Sequential updates keep the network calm and surface failures one at
+    // a time in toasts rather than as a pile.
+    for (const prog of updates) {
+      // eslint-disable-next-line no-await-in-loop
+      await doUpdate(prog);
+    }
+    toast(`Updated ${updates.length} ${updates.length === 1 ? 'program' : 'programs'}`);
+  }
+  document.getElementById('btn-update-all')?.addEventListener('click', doUpdateAll);
+
   pinUnpin?.addEventListener('click', async () => {
     if (!pinProg) return;
     const slug = pinProg.slug;
