@@ -1,6 +1,6 @@
 {
-  "name": "cove-suite",
-  "version": "1.0.0",
+  "name": "cove-nexus",
+  "version": "1.1.0",
   "description": "The Cove Nexus — install, launch, and update every Cove tool from a single window.",
   "main": "main.js",
   "author": {
@@ -8,7 +8,7 @@
     "email": "79215527+Sin213@users.noreply.github.com"
   },
   "license": "MIT",
-  "homepage": "https://github.com/Sin213/cove-suite",
+  "homepage": "https://github.com/Sin213/cove-nexus",
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder",
@@ -24,8 +24,8 @@
     "electron-builder": "^26.9.0"
   },
   "build": {
-    "appId": "com.sin.cove-suite",
-    "productName": "Cove Suite",
+    "appId": "com.sin.cove-nexus",
+    "productName": "Cove Nexus",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -40,7 +40,7 @@
       {
         "provider": "github",
         "owner": "Sin213",
-        "repo": "cove-suite"
+        "repo": "cove-nexus"
       }
     ],
     "linux": {
@@ -49,7 +49,7 @@
       ],
       "category": "Utility",
       "icon": "build/icon.png",
-      "artifactName": "Cove-Suite-${version}-${arch}.AppImage"
+      "artifactName": "Cove-Nexus-${version}-${arch}.AppImage"
     },
     "win": {
       "target": [
@@ -69,15 +69,15 @@
       "icon": "build/icon.png"
     },
     "portable": {
-      "artifactName": "Cove-Suite-${version}-Portable.exe"
+      "artifactName": "Cove-Nexus-${version}-Portable.exe"
     },
     "nsis": {
       "oneClick": true,
       "perMachine": false,
       "allowElevation": false,
       "deleteAppDataOnUninstall": false,
-      "shortcutName": "Cove Suite",
-      "artifactName": "Cove-Suite-${version}-Setup.exe"
+      "shortcutName": "Cove Nexus",
+      "artifactName": "Cove-Nexus-${version}-Setup.exe"
     }
   }
 }

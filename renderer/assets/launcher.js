@@ -550,6 +550,50 @@
 
   document.getElementById('btn-refresh')?.addEventListener('click', doRefresh);
 
+  // Settings modal
+  const settingsOverlay = document.getElementById('settings-overlay');
+  const settingsPath = document.getElementById('settings-programs-root');
+  const settingsConfigPath = document.getElementById('settings-config-dir');
+
+  async function refreshSettingsPaths() {
+    if (!IS_DESKTOP) return;
+    try {
+      const cfg = await coveAPI.config.get();
+      if (settingsPath) settingsPath.textContent = cfg.programsRoot || '—';
+      if (settingsConfigPath) settingsConfigPath.textContent = cfg.userData || '—';
+    } catch {}
+  }
+  function openSettings() {
+    if (!settingsOverlay) return;
+    refreshSettingsPaths();
+    settingsOverlay.classList.add('open');
+  }
+  function closeSettings() { settingsOverlay?.classList.remove('open'); }
+
+  document.getElementById('btn-settings')?.addEventListener('click', openSettings);
+  document.getElementById('settings-close')?.addEventListener('click', closeSettings);
+  settingsOverlay?.addEventListener('click', (e) => { if (e.target === settingsOverlay) closeSettings(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSettings(); });
+
+  document.getElementById('settings-change')?.addEventListener('click', async () => {
+    if (!IS_DESKTOP) return;
+    const res = await coveAPI.config.setProgramsRoot();
+    if (res?.ok) {
+      toast(`Programs folder → ${res.programsRoot}`);
+      await refreshSettingsPaths();
+      await rescan();
+      render();
+    } else if (res?.error) {
+      toast(`Couldn't change folder: ${res.error}`, 'error');
+    }
+  });
+  document.getElementById('settings-open')?.addEventListener('click', () => {
+    if (IS_DESKTOP) coveAPI.config.revealProgramsRoot();
+  });
+  document.getElementById('settings-open-config')?.addEventListener('click', () => {
+    if (IS_DESKTOP) coveAPI.config.revealConfigDir();
+  });
+
   // Auto-refresh: every 10 min, and when window regains focus (after being > 30s idle).
   if (IS_DESKTOP) {
     const TEN_MIN = 10 * 60 * 1000;

@@ -6,14 +6,41 @@ const { spawn } = require('node:child_process');
 const os = require('node:os');
 const https = require('node:https');
 
-const PROGRAMS_DIR = path.join(os.homedir(), '.cove-suite', 'programs');
+const APP_ID = 'cove-nexus';
 const GITHUB_OWNER = 'Sin213';
-const UA = 'cove-suite-launcher';
+const GITHUB_REPO = 'cove-nexus';
+const UA = 'cove-nexus-launcher';
 
-app.setName('Cove Suite');
-fs.mkdirSync(PROGRAMS_DIR, { recursive: true });
+// Pin the on-disk name to a lowercase, XDG-friendly form rather than the
+// display name ("Cove Nexus"), which Electron would otherwise turn into
+// "~/.config/Cove Nexus/" with a space and capitals.
+app.setName('Cove Nexus');
+app.setPath('userData', path.join(app.getPath('appData'), APP_ID));
+
+const USER_DATA = app.getPath('userData');
+const CONFIG_FILE = path.join(USER_DATA, 'config.json');
+const INSTALLS_FILE = path.join(USER_DATA, 'installs.json');
+
+// Old Cove Suite stashed everything under ~/.cove-suite/. We migrate from
+// there on first v1.1.0 boot but never write to it going forward.
+const LEGACY_ROOT = path.join(os.homedir(), '.cove-suite');
+const LEGACY_PROGRAMS = path.join(LEGACY_ROOT, 'programs');
+
+fs.mkdirSync(USER_DATA, { recursive: true });
 
 let mainWindow = null;
+
+function defaultProgramsRoot() {
+  if (process.platform === 'win32') {
+    const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    return path.join(local, APP_ID, 'programs');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', APP_ID, 'programs');
+  }
+  const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  return path.join(dataHome, APP_ID, 'programs');
+}
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -22,6 +49,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     backgroundColor: '#0b0b10',
+    show: false,
     title: '',
     frame: false,
     icon: path.join(__dirname, 'renderer', 'assets', 'cove_icon.png'),
@@ -35,6 +63,9 @@ function createWindow() {
 
   win.setMenuBarVisibility(false);
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  // Hold the window hidden until the renderer has painted, so users don't
+  // see a black flash while the page loads.
+  win.once('ready-to-show', () => win.show());
   mainWindow = win;
   win.on('page-title-updated', (e) => e.preventDefault());
   win.on('closed', () => { if (mainWindow === win) mainWindow = null; });
@@ -43,6 +74,9 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  migrateLegacyInstalls();
+  ensureProgramsRoot();
+  adoptFromProgramsRoot();
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -52,7 +86,7 @@ app.whenReady().then(() => {
 
 // Silent auto-update: packaged builds only. Checks on boot and hourly.
 // When an update is downloaded, the app relaunches itself immediately.
-// No prompt. No toast. Configured against github.com/Sin213/cove-suite releases.
+// No prompt. No toast. Configured against github.com/Sin213/cove-nexus releases.
 function setupAutoUpdater() {
   if (!app.isPackaged) return;
   let autoUpdater;
@@ -76,44 +110,98 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-// ---------- paths + install record ----------
-
-function programDir(slug) {
-  return path.join(PROGRAMS_DIR, slug);
-}
-
-function installedJsonPath(slug) {
-  return path.join(programDir(slug), 'installed.json');
-}
+// ---------- small utils ----------
 
 function exists(p) {
   try { fs.accessSync(p); return true; } catch { return false; }
 }
 
-function readInstalled(slug) {
-  try { return JSON.parse(fs.readFileSync(installedJsonPath(slug), 'utf8')); }
-  catch { return null; }
+// ---------- config (~/.config/cove-nexus/config.json) ----------
+
+function readConfig() {
+  try {
+    const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    return {
+      programsRoot: typeof c?.programsRoot === 'string' && c.programsRoot
+        ? c.programsRoot
+        : defaultProgramsRoot(),
+    };
+  } catch {
+    const c = { programsRoot: defaultProgramsRoot() };
+    writeConfig(c);
+    return c;
+  }
 }
 
-function writeInstalled(slug, info) {
-  fs.mkdirSync(programDir(slug), { recursive: true });
-  fs.writeFileSync(installedJsonPath(slug), JSON.stringify(info, null, 2), 'utf8');
+function writeConfig(c) {
+  fs.mkdirSync(USER_DATA, { recursive: true });
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(c, null, 2), 'utf8');
 }
 
-// Older versions of Cove Suite cloned the tool's git repo into the programs
-// dir and tried to run its Python source. Those installs have a `.git`
-// directory but no `installed.json`. Treat them as stale and mark for
-// reinstall so users land on the prebuilt release binary instead.
-function isLegacyInstall(slug) {
-  const dir = programDir(slug);
-  if (!exists(dir)) return false;
-  if (readInstalled(slug)) return false;
-  return exists(path.join(dir, '.git'));
+function ensureProgramsRoot() {
+  const root = readConfig().programsRoot;
+  try { fs.mkdirSync(root, { recursive: true }); } catch {}
+  return root;
 }
 
-// ---------- platform asset picking ----------
+// ---------- registry (~/.config/cove-nexus/installs.json) ----------
+// Shape: { [slug]: { tag, path, source: 'managed' | 'adopted' } }
 
-// Ordered regexes — the first asset whose name matches wins.
+function readRegistry() {
+  try { return JSON.parse(fs.readFileSync(INSTALLS_FILE, 'utf8')) || {}; }
+  catch { return {}; }
+}
+
+function writeRegistry(reg) {
+  fs.mkdirSync(USER_DATA, { recursive: true });
+  fs.writeFileSync(INSTALLS_FILE, JSON.stringify(reg, null, 2), 'utf8');
+}
+
+function registerInstall(slug, info) {
+  const reg = readRegistry();
+  reg[slug] = { ...(reg[slug] || {}), ...info };
+  writeRegistry(reg);
+}
+
+function forgetInstall(slug) {
+  const reg = readRegistry();
+  delete reg[slug];
+  writeRegistry(reg);
+}
+
+// ---------- asset naming ----------
+
+// electron-builder uses different casings per platform. Case-insensitive
+// matching handles: cove-video-editor, Cove-Video-Editor, Cove-GIF-Maker.
+function assetPatternsForSlug(slug) {
+  const esc = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return [
+    new RegExp(`^${esc}-(\\d[\\d.]*)-Portable\\.exe$`, 'i'),
+    new RegExp(`^${esc}-(\\d[\\d.]*)-Setup\\.exe$`, 'i'),
+    new RegExp(`^${esc}-(\\d[\\d.]*)-x86_64\\.AppImage$`, 'i'),
+    new RegExp(`^${esc}_(\\d[\\d.]*)_amd64\\.deb$`, 'i'),
+  ];
+}
+
+function matchAsset(slug, filename) {
+  for (const re of assetPatternsForSlug(slug)) {
+    const m = filename.match(re);
+    if (m) return { version: m[1] };
+  }
+  return null;
+}
+
+// Extract a cove-* slug from a release-artifact filename without knowing
+// the slug in advance. Used by adoption when walking arbitrary folders.
+function detectSlugFromFilename(name) {
+  const m = name.match(/^(cove(?:[-_][a-z0-9]+)+)(?:[-_.])(\d[\d.]*)[-_.]/i);
+  if (!m) return null;
+  return m[1].toLowerCase().replace(/_/g, '-');
+}
+
+// Ordered regexes — first asset whose name matches wins. Preference is
+// Portable.exe on Windows (Cove Nexus fully manages these, no installer
+// wizard flash) and x86_64.AppImage on Linux.
 function assetPreferencesForPlatform() {
   if (process.platform === 'win32') {
     return [/-Portable\.exe$/i, /-Setup\.exe$/i, /\.exe$/i];
@@ -130,6 +218,98 @@ function pickAsset(assets) {
     if (hit) return hit;
   }
   return null;
+}
+
+// ---------- adoption ----------
+
+// Walk the programs root and adopt any file whose name matches a cove-*
+// release artifact that isn't already in the registry. Runs on boot and
+// on every scan, so files added between runs are picked up.
+function adoptFromProgramsRoot() {
+  const root = readConfig().programsRoot;
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
+  const reg = readRegistry();
+  let changed = false;
+
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const slug = detectSlugFromFilename(entry.name);
+    if (!slug) continue;
+    const match = matchAsset(slug, entry.name);
+    if (!match) continue;
+    if (reg[slug] && reg[slug].path && exists(reg[slug].path)) continue;
+    reg[slug] = {
+      tag: `v${match.version}`,
+      path: path.join(root, entry.name),
+      source: 'adopted',
+    };
+    changed = true;
+  }
+  if (changed) writeRegistry(reg);
+}
+
+// ---------- legacy migration from ~/.cove-suite/ ----------
+
+// One-shot walk: if ~/.cove-suite/programs/<slug>/ has a real binary (either
+// recorded in installed.json from fixed v1.0.0, or sitting under bin/),
+// register it in the new installs.json pointing at its existing path.
+// We do NOT move files — users may prefer them where they are, and a
+// half-completed move is worse than a pointer.
+function migrateLegacyInstalls() {
+  if (!exists(LEGACY_PROGRAMS)) return;
+  let slugDirs = [];
+  try {
+    slugDirs = fs.readdirSync(LEGACY_PROGRAMS, { withFileTypes: true })
+      .filter(e => e.isDirectory()).map(e => e.name);
+  } catch { return; }
+
+  const reg = readRegistry();
+  let changed = false;
+
+  for (const slug of slugDirs) {
+    if (reg[slug]?.path && exists(reg[slug].path)) continue;
+    const slugDir = path.join(LEGACY_PROGRAMS, slug);
+
+    try {
+      const info = JSON.parse(fs.readFileSync(path.join(slugDir, 'installed.json'), 'utf8'));
+      if (info?.entry) {
+        const abs = path.join(slugDir, info.entry);
+        if (exists(abs)) {
+          reg[slug] = { tag: info.tag || '', path: abs, source: 'managed' };
+          changed = true;
+          continue;
+        }
+      }
+    } catch {}
+
+    const binDir = path.join(slugDir, 'bin');
+    if (exists(binDir)) {
+      try {
+        for (const f of fs.readdirSync(binDir)) {
+          const m = matchAsset(slug, f);
+          if (m) {
+            reg[slug] = { tag: `v${m.version}`, path: path.join(binDir, f), source: 'managed' };
+            changed = true;
+            break;
+          }
+        }
+      } catch {}
+    }
+    // If neither installed.json nor a bin/ binary resolves, it's a
+    // pre-fix v1.0.0 git clone; isLegacyClone() below flags it for reinstall.
+  }
+
+  if (changed) writeRegistry(reg);
+}
+
+function isLegacyClone(slug) {
+  const d = path.join(LEGACY_PROGRAMS, slug);
+  if (!exists(d)) return false;
+  if (!exists(path.join(d, '.git'))) return false;
+  const reg = readRegistry();
+  // Migration may have already registered a real binary from this slug dir.
+  return !(reg[slug]?.path && exists(reg[slug].path));
 }
 
 // ---------- https ----------
@@ -210,14 +390,12 @@ function downloadToFile(url, dest) {
 }
 
 async function fetchLatestRelease(slug) {
-  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${slug}/releases/latest`;
-  return httpsGetJson(url);
+  return httpsGetJson(`https://api.github.com/repos/${GITHUB_OWNER}/${slug}/releases/latest`);
 }
 
-async function installOrUpdate(slug, { force = false } = {}) {
-  const dir = programDir(slug);
-  fs.mkdirSync(dir, { recursive: true });
+// ---------- install / update / launch ----------
 
+async function installOrUpdate(slug, { force = false } = {}) {
   const release = await fetchLatestRelease(slug);
   const tag = release?.tag_name || '';
   const asset = pickAsset(release?.assets);
@@ -226,42 +404,35 @@ async function installOrUpdate(slug, { force = false } = {}) {
     throw new Error(`No ${plat} build available in release ${tag || '(unknown)'}.`);
   }
 
-  const current = readInstalled(slug);
-  const binDir = path.join(dir, 'bin');
-  const final = path.join(binDir, asset.name);
-  if (!force && current && current.tag === tag && exists(final)) {
+  const reg = readRegistry();
+  const current = reg[slug];
+  const root = ensureProgramsRoot();
+  const finalPath = path.join(root, asset.name);
+
+  if (!force && current?.tag === tag && current.path && exists(current.path)) {
     return { ok: true, already: true, tag };
   }
 
-  fs.mkdirSync(binDir, { recursive: true });
-  const tmp = path.join(binDir, `.${asset.name}.part`);
+  const tmp = path.join(root, `.${asset.name}.part`);
   await downloadToFile(asset.browser_download_url, tmp);
 
-  // Remove the previously-installed binary so /bin doesn't accumulate
-  // stale copies of old versions.
-  if (current?.entry) {
-    const prior = path.join(dir, current.entry);
-    if (exists(prior) && prior !== final) {
-      await fsp.rm(prior, { force: true }).catch(() => {});
-    }
-  }
-  await fsp.rename(tmp, final);
-  if (process.platform === 'linux') {
-    try { fs.chmodSync(final, 0o755); } catch {}
+  // Only delete the prior file if we put it there. Adopted files belong
+  // to the user; we leave them alone and just point the registry at the
+  // new download.
+  if (current?.source === 'managed' && current.path && current.path !== finalPath && exists(current.path)) {
+    await fsp.rm(current.path, { force: true }).catch(() => {});
   }
 
-  writeInstalled(slug, {
-    slug,
-    tag,
-    asset: asset.name,
-    entry: path.relative(dir, final),
-    platform: process.platform,
-    installedAt: new Date().toISOString(),
-  });
+  await fsp.rename(tmp, finalPath);
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(finalPath, 0o755); } catch {}
+  }
+
+  registerInstall(slug, { tag, path: finalPath, source: 'managed' });
   return { ok: true, tag };
 }
 
-function planFromEntry(absPath) {
+function planFromPath(absPath) {
   if (/\.AppImage$/i.test(absPath)) return { cmd: absPath, args: [], kind: 'appimage' };
   if (/\.exe$/i.test(absPath))      return { cmd: absPath, args: [], kind: 'exe' };
   if (/\.deb$/i.test(absPath))      return { cmd: 'xdg-open', args: [absPath], kind: 'deb' };
@@ -270,12 +441,7 @@ function planFromEntry(absPath) {
 
 // ---------- scan ----------
 
-async function scanOneInstalled(slug) {
-  if (isLegacyInstall(slug)) {
-    return { slug, manifest: null, hasUpdate: true, legacy: true, version: '', latestTag: '' };
-  }
-  const info = readInstalled(slug);
-  if (!info) return { slug, manifest: null, hasUpdate: false, version: '', latestTag: '' };
+async function scanOneInstalled(slug, info) {
   let latestTag = '';
   try {
     const rel = await fetchLatestRelease(slug);
@@ -284,13 +450,15 @@ async function scanOneInstalled(slug) {
   return {
     slug,
     manifest: null,
-    hasUpdate: !!(latestTag && info.tag && latestTag !== info.tag),
-    version: info.tag,
+    installed: true,
+    source: info.source || 'managed',
+    version: info.tag || '',
     latestTag,
+    hasUpdate: !!(latestTag && info.tag && latestTag !== info.tag),
   };
 }
 
-// ---------- IPC ----------
+// ---------- IPC: app + config ----------
 
 ipcMain.handle('cove:appInfo', () => ({
   version: app.getVersion(),
@@ -298,84 +466,139 @@ ipcMain.handle('cove:appInfo', () => ({
   packaged: app.isPackaged,
 }));
 
-ipcMain.handle('cove:getState', async () => {
-  let installed = [];
-  try {
-    installed = fs.readdirSync(PROGRAMS_DIR, { withFileTypes: true })
-      .filter(e => e.isDirectory())
-      .map(e => e.name);
-  } catch {}
-  return { programsDir: PROGRAMS_DIR, installed };
+ipcMain.handle('cove:config:get', () => {
+  const cfg = readConfig();
+  return {
+    programsRoot: cfg.programsRoot,
+    userData: USER_DATA,
+    defaultRoot: defaultProgramsRoot(),
+  };
 });
 
-ipcMain.handle('cove:scan', async (_e, opts = {}) => {
-  const checkUpdates = opts.checkUpdates !== false;
-  let installedSlugs = [];
+ipcMain.handle('cove:config:setProgramsRoot', async () => {
+  const cfg = readConfig();
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    title: 'Choose programs folder',
+    defaultPath: cfg.programsRoot,
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (canceled || !filePaths?.length) return { ok: false, cancelled: true };
+  const next = filePaths[0];
   try {
-    installedSlugs = fs.readdirSync(PROGRAMS_DIR, { withFileTypes: true })
-      .filter(e => e.isDirectory())
-      .map(e => e.name);
-  } catch {}
-  const installed = await Promise.all(installedSlugs.map(async (slug) => {
-    if (!checkUpdates) {
-      const info = readInstalled(slug);
-      return { slug, manifest: null, hasUpdate: false, version: info?.tag || '', legacy: isLegacyInstall(slug) };
+    fs.mkdirSync(next, { recursive: true });
+    writeConfig({ ...cfg, programsRoot: next });
+    adoptFromProgramsRoot();
+    return { ok: true, programsRoot: next };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
+ipcMain.handle('cove:config:revealConfigDir', () => {
+  shell.openPath(USER_DATA);
+  return { ok: true };
+});
+
+ipcMain.handle('cove:config:revealProgramsRoot', () => {
+  const root = readConfig().programsRoot;
+  if (!exists(root)) return { ok: false, error: 'missing' };
+  shell.openPath(root);
+  return { ok: true };
+});
+
+// ---------- IPC: scan / install / update / launch ----------
+
+ipcMain.handle('cove:getState', async () => ({
+  programsRoot: readConfig().programsRoot,
+  installed: Object.keys(readRegistry()),
+}));
+
+ipcMain.handle('cove:scan', async (_e, opts = {}) => {
+  adoptFromProgramsRoot();
+  const checkUpdates = opts.checkUpdates !== false;
+  const reg = readRegistry();
+
+  // Prune registry entries whose file has vanished, so the UI flips them
+  // back to "not installed" instead of showing a phantom launch button.
+  let pruned = false;
+  for (const [slug, info] of Object.entries(reg)) {
+    if (info?.path && !exists(info.path)) {
+      delete reg[slug];
+      pruned = true;
     }
-    try { return await scanOneInstalled(slug); }
-    catch { return { slug, manifest: null, hasUpdate: false, version: '', latestTag: '' }; }
+  }
+  if (pruned) writeRegistry(reg);
+
+  const rows = await Promise.all(Object.entries(reg).map(async ([slug, info]) => {
+    if (!checkUpdates) {
+      return { slug, manifest: null, installed: true, hasUpdate: false,
+               version: info.tag || '', source: info.source || 'managed' };
+    }
+    try { return await scanOneInstalled(slug, info); }
+    catch {
+      return { slug, manifest: null, installed: true, hasUpdate: false,
+               version: info.tag || '', source: info.source || 'managed' };
+    }
   }));
-  return { programsDir: PROGRAMS_DIR, installed };
+
+  // Surface legacy git-clone installs so the UI can show them as stale.
+  if (exists(LEGACY_PROGRAMS)) {
+    try {
+      for (const d of fs.readdirSync(LEGACY_PROGRAMS, { withFileTypes: true })) {
+        if (!d.isDirectory()) continue;
+        if (!isLegacyClone(d.name)) continue;
+        if (reg[d.name]) continue;
+        rows.push({ slug: d.name, manifest: null, installed: true, hasUpdate: true,
+                    legacy: true, version: '', latestTag: '' });
+      }
+    } catch {}
+  }
+
+  return { programsRoot: readConfig().programsRoot, installed: rows };
 });
 
 ipcMain.handle('cove:install', async (_e, slug) => {
   if (!/^[a-z0-9][a-z0-9-]*$/i.test(slug)) return { ok: false, error: 'invalid slug' };
-  if (isLegacyInstall(slug)) {
-    await fsp.rm(programDir(slug), { recursive: true, force: true }).catch(() => {});
+  // If a legacy git clone is blocking the slug, clear it — the new binary
+  // will land in the programs root, not in ~/.cove-suite.
+  const legacyDir = path.join(LEGACY_PROGRAMS, slug);
+  if (isLegacyClone(slug)) {
+    await fsp.rm(legacyDir, { recursive: true, force: true }).catch(() => {});
   }
-  try {
-    return await installOrUpdate(slug, { force: false });
-  } catch (err) {
-    await fsp.rm(programDir(slug), { recursive: true, force: true }).catch(() => {});
-    return { ok: false, error: String(err?.message || err) };
-  }
+  try { return await installOrUpdate(slug, { force: false }); }
+  catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
 
 ipcMain.handle('cove:update', async (_e, slug) => {
-  const dir = programDir(slug);
-  if (!exists(dir)) return { ok: false, error: 'not installed' };
-  try {
-    if (isLegacyInstall(slug)) {
-      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
-    }
-    return await installOrUpdate(slug, { force: false });
-  } catch (err) {
-    return { ok: false, error: String(err?.message || err) };
+  const reg = readRegistry();
+  const legacyDir = path.join(LEGACY_PROGRAMS, slug);
+  if (!reg[slug] && !exists(legacyDir)) return { ok: false, error: 'not installed' };
+  if (isLegacyClone(slug)) {
+    await fsp.rm(legacyDir, { recursive: true, force: true }).catch(() => {});
   }
+  try { return await installOrUpdate(slug, { force: false }); }
+  catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
 
 ipcMain.handle('cove:launch', async (_e, slug) => {
-  const dir = programDir(slug);
-  if (!exists(dir)) return { ok: false, error: 'not installed' };
-  if (isLegacyInstall(slug)) {
-    return { ok: false, error: 'This install is from an older Cove Suite. Click Update to reinstall as a binary.' };
+  if (isLegacyClone(slug)) {
+    return { ok: false, error: 'This install is from an older version. Click Update to reinstall as a binary.' };
   }
-  const info = readInstalled(slug);
-  if (!info?.entry) return { ok: false, error: 'Install info missing. Try reinstalling.' };
-  const entry = path.join(dir, info.entry);
-  if (!exists(entry)) return { ok: false, error: `Missing entry: ${entry}` };
+  const info = readRegistry()[slug];
+  if (!info?.path) return { ok: false, error: 'Not installed.' };
+  if (!exists(info.path)) return { ok: false, error: `Missing: ${info.path}` };
 
-  const plan = planFromEntry(entry);
+  const plan = planFromPath(info.path);
   try {
     const child = spawn(plan.cmd, plan.args, {
-      cwd: dir,
+      cwd: path.dirname(info.path),
       detached: true,
       stdio: 'ignore',
       env: process.env,
     });
     child.unref();
-    // Give the OS a beat to surface ENOENT/EACCES synchronously before we
-    // report success. Without this, the old flow always toasted "launched"
-    // even when the binary never actually started.
+    // Let the OS surface ENOENT/EACCES synchronously before we report
+    // success. Without this, a failed spawn looked identical to a launch.
     return await new Promise((resolve) => {
       let settled = false;
       child.once('error', (err) => {
@@ -395,9 +618,45 @@ ipcMain.handle('cove:launch', async (_e, slug) => {
 });
 
 ipcMain.handle('cove:revealInstall', async (_e, slug) => {
-  const dir = slug ? programDir(slug) : PROGRAMS_DIR;
-  if (!exists(dir)) return { ok: false, error: 'missing' };
-  shell.openPath(dir);
+  const info = readRegistry()[slug];
+  if (info?.path && exists(info.path)) {
+    shell.showItemInFolder(info.path);
+    return { ok: true };
+  }
+  const legacyDir = path.join(LEGACY_PROGRAMS, slug);
+  if (exists(legacyDir)) { shell.openPath(legacyDir); return { ok: true }; }
+  const root = readConfig().programsRoot;
+  if (exists(root)) { shell.openPath(root); return { ok: true }; }
+  return { ok: false, error: 'missing' };
+});
+
+ipcMain.handle('cove:uninstall', async (_e, slug) => {
+  const info = readRegistry()[slug];
+  const legacyDir = path.join(LEGACY_PROGRAMS, slug);
+  if (!info && !exists(legacyDir)) return { ok: true, already: true };
+
+  const adopted = info?.source === 'adopted';
+  const buttons = adopted ? ['Cancel', 'Forget'] : ['Cancel', 'Remove'];
+  const detail = adopted
+    ? `The file at ${info.path} will be kept — Cove Nexus didn't put it there. Only the registry entry is cleared, and the tool will show as "not installed" until you re-adopt it.`
+    : info?.path
+      ? `This deletes ${info.path}.`
+      : `This deletes ${legacyDir}.`;
+  const { response } = await dialog.showMessageBox({
+    type: 'warning', buttons, defaultId: 0, cancelId: 0,
+    title: buttons[1],
+    message: adopted ? `Forget ${slug}?` : `Remove ${slug}?`,
+    detail,
+  });
+  if (response !== 1) return { ok: false, cancelled: true };
+
+  if (!adopted && info?.path && exists(info.path)) {
+    await fsp.rm(info.path, { force: true }).catch(() => {});
+  }
+  if (exists(legacyDir)) {
+    await fsp.rm(legacyDir, { recursive: true, force: true }).catch(() => {});
+  }
+  forgetInstall(slug);
   return { ok: true };
 });
 
@@ -421,9 +680,9 @@ ipcMain.handle('cove:discover', async (_e, opts = {}) => {
     return { ok: true, cached: true, repos: discoveryCache.data };
   }
   try {
-    const repos = await httpsGetJson('https://api.github.com/users/Sin213/repos?per_page=100&sort=updated');
+    const repos = await httpsGetJson(`https://api.github.com/users/${GITHUB_OWNER}/repos?per_page=100&sort=updated`);
     const mapped = (repos || [])
-      .filter(r => typeof r?.name === 'string' && /^cove-/i.test(r.name) && r.name !== 'cove-suite' && !r.archived && !r.disabled)
+      .filter(r => typeof r?.name === 'string' && /^cove-/i.test(r.name) && r.name !== GITHUB_REPO && !r.archived && !r.disabled)
       .map(r => ({
         slug: r.name,
         name: prettyName(r.name),
@@ -451,20 +710,3 @@ function formatUpdated(iso) {
     return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: '2-digit' });
   } catch { return '—'; }
 }
-
-ipcMain.handle('cove:uninstall', async (_e, slug) => {
-  const dir = programDir(slug);
-  if (!exists(dir)) return { ok: true, already: true };
-  const { response } = await dialog.showMessageBox({
-    type: 'warning',
-    buttons: ['Cancel', 'Uninstall'],
-    defaultId: 0,
-    cancelId: 0,
-    title: 'Uninstall',
-    message: `Remove ${slug}?`,
-    detail: `This deletes ${dir}. Any user data inside that folder will be lost.`,
-  });
-  if (response !== 1) return { ok: false, cancelled: true };
-  await fsp.rm(dir, { recursive: true, force: true });
-  return { ok: true };
-});

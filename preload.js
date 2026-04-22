@@ -11,6 +11,13 @@ contextBridge.exposeInMainWorld('coveAPI', {
   revealInstall:  (slug) => ipcRenderer.invoke('cove:revealInstall', slug),
   discover:       (opts) => ipcRenderer.invoke('cove:discover', opts || {}),
 
+  config: {
+    get:                 () => ipcRenderer.invoke('cove:config:get'),
+    setProgramsRoot:     () => ipcRenderer.invoke('cove:config:setProgramsRoot'),
+    revealConfigDir:     () => ipcRenderer.invoke('cove:config:revealConfigDir'),
+    revealProgramsRoot:  () => ipcRenderer.invoke('cove:config:revealProgramsRoot'),
+  },
+
   win: {
     close:            () => ipcRenderer.invoke('cove:window:close'),
     minimize:         () => ipcRenderer.invoke('cove:window:minimize'),

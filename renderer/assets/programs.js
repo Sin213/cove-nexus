@@ -1,7 +1,7 @@
-// Cove Suite program registry.
-// Versions and dates here reflect each repo's latest GitHub release; update
-// detection at runtime is done by comparing local HEAD vs origin/HEAD and does
-// not rely on the `version` field here.
+// Cove Nexus program registry.
+// Versions and dates here are fallbacks shown before runtime data loads.
+// Actual update detection is done by comparing the locally-installed release
+// tag (installs.json) to GitHub's /releases/latest tag.
 window.PROGRAMS = [
   {
     name: "Cove Upscaler",
