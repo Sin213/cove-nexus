@@ -393,10 +393,32 @@ async function fetchLatestRelease(slug) {
   return httpsGetJson(`https://api.github.com/repos/${GITHUB_OWNER}/${slug}/releases/latest`);
 }
 
+async function fetchReleases(slug) {
+  return httpsGetJson(`https://api.github.com/repos/${GITHUB_OWNER}/${slug}/releases?per_page=30`);
+}
+
+async function fetchReleaseByTag(slug, tag) {
+  const t = encodeURIComponent(tag);
+  return httpsGetJson(`https://api.github.com/repos/${GITHUB_OWNER}/${slug}/releases/tags/${t}`);
+}
+
 // ---------- install / update / launch ----------
 
-async function installOrUpdate(slug, { force = false } = {}) {
-  const release = await fetchLatestRelease(slug);
+// Resolve which release to install: the user's pin, an explicit tag, or latest.
+async function resolveRelease(slug, { tag, usePin = true } = {}) {
+  if (tag) return fetchReleaseByTag(slug, tag);
+  if (usePin) {
+    const pinned = readRegistry()[slug]?.pinnedTag;
+    if (pinned) {
+      try { return await fetchReleaseByTag(slug, pinned); }
+      catch (e) { /* pinned tag removed upstream; fall through to latest */ }
+    }
+  }
+  return fetchLatestRelease(slug);
+}
+
+async function installOrUpdate(slug, { force = false, tag: explicitTag } = {}) {
+  const release = await resolveRelease(slug, { tag: explicitTag });
   const tag = release?.tag_name || '';
   const asset = pickAsset(release?.assets);
   if (!asset) {
@@ -428,7 +450,14 @@ async function installOrUpdate(slug, { force = false } = {}) {
     try { fs.chmodSync(finalPath, 0o755); } catch {}
   }
 
-  registerInstall(slug, { tag, path: finalPath, source: 'managed' });
+  // Preserve pinnedTag across updates — the pin is user intent, not a
+  // function of the release we just downloaded.
+  registerInstall(slug, {
+    tag,
+    path: finalPath,
+    source: 'managed',
+    ...(current?.pinnedTag ? { pinnedTag: current.pinnedTag } : {}),
+  });
   return { ok: true, tag };
 }
 
@@ -447,6 +476,12 @@ async function scanOneInstalled(slug, info) {
     const rel = await fetchLatestRelease(slug);
     latestTag = rel?.tag_name || '';
   } catch {}
+  // Pinned installs suppress the update prompt even when a newer release
+  // exists upstream. The user explicitly asked to stay on this version.
+  const pinned = info.pinnedTag || '';
+  const hasUpdate = pinned
+    ? false
+    : !!(latestTag && info.tag && latestTag !== info.tag);
   return {
     slug,
     manifest: null,
@@ -454,7 +489,8 @@ async function scanOneInstalled(slug, info) {
     source: info.source || 'managed',
     version: info.tag || '',
     latestTag,
-    hasUpdate: !!(latestTag && info.tag && latestTag !== info.tag),
+    hasUpdate,
+    pinnedTag: pinned,
   };
 }
 
@@ -532,12 +568,14 @@ ipcMain.handle('cove:scan', async (_e, opts = {}) => {
   const rows = await Promise.all(Object.entries(reg).map(async ([slug, info]) => {
     if (!checkUpdates) {
       return { slug, manifest: null, installed: true, hasUpdate: false,
-               version: info.tag || '', source: info.source || 'managed' };
+               version: info.tag || '', source: info.source || 'managed',
+               pinnedTag: info.pinnedTag || '' };
     }
     try { return await scanOneInstalled(slug, info); }
     catch {
       return { slug, manifest: null, installed: true, hasUpdate: false,
-               version: info.tag || '', source: info.source || 'managed' };
+               version: info.tag || '', source: info.source || 'managed',
+               pinnedTag: info.pinnedTag || '' };
     }
   }));
 
@@ -628,6 +666,74 @@ ipcMain.handle('cove:revealInstall', async (_e, slug) => {
   const root = readConfig().programsRoot;
   if (exists(root)) { shell.openPath(root); return { ok: true }; }
   return { ok: false, error: 'missing' };
+});
+
+ipcMain.handle('cove:releases', async (_e, slug) => {
+  if (!/^[a-z0-9][a-z0-9-]*$/i.test(slug)) return { ok: false, error: 'invalid slug' };
+  try {
+    const releases = await fetchReleases(slug);
+    const rows = (releases || [])
+      .filter(r => !r.draft)
+      .map(r => ({
+        tag: r.tag_name || '',
+        name: r.name || r.tag_name || '',
+        prerelease: !!r.prerelease,
+        publishedAt: r.published_at || r.created_at || '',
+        hasAsset: !!pickAsset(r.assets),
+      }));
+    return { ok: true, releases: rows, current: readRegistry()[slug]?.tag || '', pinned: readRegistry()[slug]?.pinnedTag || '' };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
+ipcMain.handle('cove:pin', async (_e, slug, tag) => {
+  if (!/^[a-z0-9][a-z0-9-]*$/i.test(slug)) return { ok: false, error: 'invalid slug' };
+  if (!tag || typeof tag !== 'string') return { ok: false, error: 'no tag' };
+  // Install the pinned tag first, then record the pin. If the download
+  // fails we don't want a pin pointing at a version that was never
+  // installed, so order matters.
+  try {
+    await installOrUpdate(slug, { force: true, tag });
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+  registerInstall(slug, { pinnedTag: tag });
+  return { ok: true, tag };
+});
+
+ipcMain.handle('cove:unpin', async (_e, slug) => {
+  const reg = readRegistry();
+  if (!reg[slug]) return { ok: false, error: 'not installed' };
+  delete reg[slug].pinnedTag;
+  writeRegistry(reg);
+  return { ok: true };
+});
+
+ipcMain.handle('cove:setCustomPath', async (_e, slug) => {
+  if (!/^[a-z0-9][a-z0-9-]*$/i.test(slug)) return { ok: false, error: 'invalid slug' };
+  const filters = process.platform === 'win32'
+    ? [{ name: 'Executable', extensions: ['exe'] }]
+    : [{ name: 'AppImage', extensions: ['AppImage', 'appimage'] }, { name: 'All files', extensions: ['*'] }];
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    title: `Select binary for ${slug}`,
+    properties: ['openFile'],
+    filters,
+  });
+  if (canceled || !filePaths?.length) return { ok: false, cancelled: true };
+  const chosen = filePaths[0];
+  if (!exists(chosen)) return { ok: false, error: 'file does not exist' };
+
+  // Try to parse a version out of the filename so the UI has something
+  // to show; if we can't, fall back to "unknown".
+  let tag = '';
+  const match = matchAsset(slug, path.basename(chosen));
+  if (match) tag = `v${match.version}`;
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(chosen, 0o755); } catch {}
+  }
+  registerInstall(slug, { tag, path: chosen, source: 'adopted' });
+  return { ok: true, path: chosen, tag };
 });
 
 ipcMain.handle('cove:uninstall', async (_e, slug) => {

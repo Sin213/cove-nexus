@@ -321,21 +321,32 @@
     const menu = document.createElement('div');
     menu.id = 'card-menu';
     const installed = isInstalled(prog);
+    const pinned = prog.pinnedTag || '';
     const items = [
       { label: 'Open GitHub', onClick: () => window.open(`https://github.com/Sin213/${prog.slug}`, '_blank') },
     ];
-    if (IS_DESKTOP && installed) {
-      items.push({ label: 'Show install folder', onClick: () => coveAPI.revealInstall(prog.slug) });
-      items.push({ label: 'Uninstall', danger: true, onClick: () => doUninstall(prog) });
+    if (IS_DESKTOP) {
+      items.push({
+        label: pinned ? `Pinned to ${pinned} — change…` : 'Pin version…',
+        onClick: () => openPinModal(prog),
+      });
+      items.push({
+        label: 'Change path…',
+        onClick: () => doChangePath(prog),
+      });
+      if (installed) {
+        items.push({ label: 'Show install folder', onClick: () => coveAPI.revealInstall(prog.slug) });
+        items.push({ label: 'Uninstall', danger: true, onClick: () => doUninstall(prog) });
+      }
     }
     menu.innerHTML = items.map((it, i) =>
       `<button data-i="${i}" style="all:unset;cursor:pointer;display:block;width:100%;padding:8px 12px;font-size:12.5px;color:${it.danger ? '#ff6b6b' : 'var(--text)'};border-radius:6px;">${it.label}</button>`
     ).join('');
-    menu.style.cssText = 'position:fixed;z-index:70;background:#0f0f17;border:1px solid var(--border-strong);border-radius:10px;padding:4px;min-width:180px;box-shadow:0 20px 40px -16px rgba(0,0,0,0.8);';
+    menu.style.cssText = 'position:fixed;z-index:70;background:#0f0f17;border:1px solid var(--border-strong);border-radius:10px;padding:4px;min-width:200px;box-shadow:0 20px 40px -16px rgba(0,0,0,0.8);';
     document.body.appendChild(menu);
     const r = anchor.getBoundingClientRect();
-    menu.style.top = `${Math.min(window.innerHeight - 160, r.bottom + 6)}px`;
-    menu.style.left = `${Math.min(window.innerWidth - 200, r.right - 180)}px`;
+    menu.style.top = `${Math.min(window.innerHeight - 220, r.bottom + 6)}px`;
+    menu.style.left = `${Math.min(window.innerWidth - 220, r.right - 200)}px`;
     menu.addEventListener('click', (e) => {
       const b = e.target.closest('button[data-i]');
       if (!b) return;
@@ -347,6 +358,21 @@
       const close = (ev) => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', close); } };
       document.addEventListener('click', close);
     }, 0);
+  }
+
+  async function doChangePath(prog) {
+    if (!IS_DESKTOP) return;
+    try {
+      const res = await coveAPI.setCustomPath(prog.slug);
+      if (res?.cancelled) return;
+      if (!res?.ok) throw new Error(res?.error || 'failed');
+      toast(`${prog.name}: using ${res.path.split('/').pop() || res.path}${res.tag ? ` (${res.tag})` : ''}`);
+      state.installedOverride[prog.slug] = true;
+      await rescan();
+      render();
+    } catch (e) {
+      toast(`Couldn't set path: ${e.message}`, 'error');
+    }
   }
 
   document.querySelectorAll('#nav-library button, #nav-categories button').forEach(b => {
@@ -529,6 +555,11 @@
         if (row.hasUpdate) state.remoteUpdates.add(row.slug);
         const prog = window.PROGRAMS.find(p => p.slug === row.slug);
         if (prog && row.manifest) applyManifest(prog, row.manifest);
+        if (prog) {
+          prog.pinnedTag = row.pinnedTag || '';
+          prog.source = row.source || '';
+          if (row.version) prog.version = row.version.replace(/^v/, '');
+        }
       }
     } catch (e) {
       toast(`Scan failed: ${e.message}`, 'error');
@@ -573,7 +604,11 @@
   document.getElementById('btn-settings')?.addEventListener('click', openSettings);
   document.getElementById('settings-close')?.addEventListener('click', closeSettings);
   settingsOverlay?.addEventListener('click', (e) => { if (e.target === settingsOverlay) closeSettings(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSettings(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    closeSettings();
+    if (typeof closePinModal === 'function') closePinModal();
+  });
 
   document.getElementById('settings-change')?.addEventListener('click', async () => {
     if (!IS_DESKTOP) return;
@@ -592,6 +627,102 @@
   });
   document.getElementById('settings-open-config')?.addEventListener('click', () => {
     if (IS_DESKTOP) coveAPI.config.revealConfigDir();
+  });
+
+  // Pin-version modal
+  const pinOverlay   = document.getElementById('pin-overlay');
+  const pinList      = document.getElementById('pin-tag-list');
+  const pinConfirm   = document.getElementById('pin-confirm');
+  const pinUnpin     = document.getElementById('pin-unpin');
+  const pinCancel    = document.getElementById('pin-cancel');
+  const pinTitle     = document.getElementById('pin-title');
+  const pinSub       = document.getElementById('pin-sub');
+  let pinProg = null;
+  let pinSelectedTag = '';
+
+  function closePinModal() { pinOverlay?.classList.remove('open'); pinProg = null; pinSelectedTag = ''; }
+
+  async function openPinModal(prog) {
+    if (!IS_DESKTOP || !pinOverlay) return;
+    pinProg = prog;
+    pinSelectedTag = '';
+    pinTitle.textContent = `Pin ${prog.name}`;
+    pinSub.textContent = 'Select a release to install. Cove Nexus will stay on this version until you unpin.';
+    pinList.innerHTML = '<div class="empty">Loading releases…</div>';
+    pinConfirm.disabled = true;
+    pinUnpin.style.display = prog.pinnedTag ? 'inline-block' : 'none';
+    pinOverlay.classList.add('open');
+
+    try {
+      const res = await coveAPI.releases(prog.slug);
+      if (!res?.ok) throw new Error(res?.error || 'failed');
+      const rows = res.releases.filter(r => r.hasAsset);
+      if (!rows.length) { pinList.innerHTML = '<div class="empty">No releases with compatible assets for this platform.</div>'; return; }
+      const currentTag = res.current || '';
+      const pinnedTag = res.pinned || '';
+      pinList.innerHTML = rows.map(r => {
+        const chips = [];
+        if (r.tag === currentTag) chips.push('<span class="tag-chip current">installed</span>');
+        if (r.tag === pinnedTag)  chips.push('<span class="tag-chip current">pinned</span>');
+        if (r.prerelease)         chips.push('<span class="tag-chip">pre-release</span>');
+        const date = r.publishedAt ? new Date(r.publishedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: '2-digit' }) : '';
+        return `<div class="tag-row" data-tag="${r.tag}">
+          <div class="tag-name">${r.tag}</div>
+          <div class="tag-meta">${date}</div>
+          ${chips.join('')}
+        </div>`;
+      }).join('');
+      pinList.querySelectorAll('.tag-row').forEach(row => {
+        row.addEventListener('click', () => {
+          pinList.querySelectorAll('.tag-row').forEach(r => r.classList.remove('selected'));
+          row.classList.add('selected');
+          pinSelectedTag = row.dataset.tag;
+          pinConfirm.disabled = false;
+        });
+      });
+    } catch (e) {
+      pinList.innerHTML = `<div class="empty">Couldn't load releases: ${e.message}</div>`;
+    }
+  }
+
+  pinCancel?.addEventListener('click', closePinModal);
+  pinOverlay?.addEventListener('click', (e) => { if (e.target === pinOverlay) closePinModal(); });
+  pinConfirm?.addEventListener('click', async () => {
+    if (!pinProg || !pinSelectedTag) return;
+    const slug = pinProg.slug;
+    const prog = pinProg;
+    pinConfirm.disabled = true;
+    pinConfirm.textContent = 'Pinning…';
+    try {
+      const res = await coveAPI.pin(slug, pinSelectedTag);
+      if (!res?.ok) throw new Error(res?.error || 'pin failed');
+      toast(`${prog.name} pinned to ${res.tag}`);
+      state.installedOverride[slug] = true;
+      state.remoteUpdates.delete(slug);
+      closePinModal();
+      await rescan();
+      render();
+    } catch (e) {
+      toast(`Pin failed: ${e.message}`, 'error');
+      pinConfirm.disabled = false;
+    } finally {
+      pinConfirm.textContent = 'Pin';
+    }
+  });
+  pinUnpin?.addEventListener('click', async () => {
+    if (!pinProg) return;
+    const slug = pinProg.slug;
+    const prog = pinProg;
+    try {
+      const res = await coveAPI.unpin(slug);
+      if (!res?.ok) throw new Error(res?.error || 'unpin failed');
+      toast(`${prog.name} unpinned`);
+      closePinModal();
+      await rescan();
+      render();
+    } catch (e) {
+      toast(`Unpin failed: ${e.message}`, 'error');
+    }
   });
 
   // Auto-refresh: every 10 min, and when window regains focus (after being > 30s idle).

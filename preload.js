@@ -10,6 +10,10 @@ contextBridge.exposeInMainWorld('coveAPI', {
   uninstall:      (slug) => ipcRenderer.invoke('cove:uninstall', slug),
   revealInstall:  (slug) => ipcRenderer.invoke('cove:revealInstall', slug),
   discover:       (opts) => ipcRenderer.invoke('cove:discover', opts || {}),
+  releases:       (slug) => ipcRenderer.invoke('cove:releases', slug),
+  pin:            (slug, tag) => ipcRenderer.invoke('cove:pin', slug, tag),
+  unpin:          (slug) => ipcRenderer.invoke('cove:unpin', slug),
+  setCustomPath:  (slug) => ipcRenderer.invoke('cove:setCustomPath', slug),
 
   config: {
     get:                 () => ipcRenderer.invoke('cove:config:get'),
