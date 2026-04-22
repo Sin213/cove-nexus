@@ -2,14 +2,13 @@ const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
-const { spawn, execFile } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const os = require('node:os');
-const git = require('isomorphic-git');
-const gitHttp = require('isomorphic-git/http/node');
+const https = require('node:https');
 
 const PROGRAMS_DIR = path.join(os.homedir(), '.cove-suite', 'programs');
-const CONFIG_DIR = path.join(os.homedir(), '.cove-suite');
 const GITHUB_OWNER = 'Sin213';
+const UA = 'cove-suite-launcher';
 
 app.setName('Cove Suite');
 fs.mkdirSync(PROGRAMS_DIR, { recursive: true });
@@ -77,149 +76,218 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-// ---------- helpers ----------
+// ---------- paths + install record ----------
 
 function programDir(slug) {
   return path.join(PROGRAMS_DIR, slug);
+}
+
+function installedJsonPath(slug) {
+  return path.join(programDir(slug), 'installed.json');
 }
 
 function exists(p) {
   try { fs.accessSync(p); return true; } catch { return false; }
 }
 
-function run(cmd, args, opts = {}) {
-  return new Promise((resolve) => {
-    execFile(cmd, args, { maxBuffer: 16 * 1024 * 1024, ...opts }, (err, stdout, stderr) => {
-      resolve({
-        ok: !err,
-        code: err ? (err.code ?? 1) : 0,
-        stdout: stdout?.toString() ?? '',
-        stderr: stderr?.toString() ?? '',
+function readInstalled(slug) {
+  try { return JSON.parse(fs.readFileSync(installedJsonPath(slug), 'utf8')); }
+  catch { return null; }
+}
+
+function writeInstalled(slug, info) {
+  fs.mkdirSync(programDir(slug), { recursive: true });
+  fs.writeFileSync(installedJsonPath(slug), JSON.stringify(info, null, 2), 'utf8');
+}
+
+// Older versions of Cove Suite cloned the tool's git repo into the programs
+// dir and tried to run its Python source. Those installs have a `.git`
+// directory but no `installed.json`. Treat them as stale and mark for
+// reinstall so users land on the prebuilt release binary instead.
+function isLegacyInstall(slug) {
+  const dir = programDir(slug);
+  if (!exists(dir)) return false;
+  if (readInstalled(slug)) return false;
+  return exists(path.join(dir, '.git'));
+}
+
+// ---------- platform asset picking ----------
+
+// Ordered regexes — the first asset whose name matches wins.
+function assetPreferencesForPlatform() {
+  if (process.platform === 'win32') {
+    return [/-Portable\.exe$/i, /-Setup\.exe$/i, /\.exe$/i];
+  }
+  if (process.platform === 'linux') {
+    return [/x86_64\.AppImage$/i, /\.AppImage$/i, /amd64\.deb$/i];
+  }
+  return [];
+}
+
+function pickAsset(assets) {
+  for (const re of assetPreferencesForPlatform()) {
+    const hit = (assets || []).find(a => re.test(a?.name || ''));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// ---------- https ----------
+
+function ghHeaders() {
+  return {
+    'User-Agent': UA,
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+}
+
+function httpsGetJson(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, {
+      method: 'GET',
+      headers: { ...ghHeaders(), ...headers },
+      timeout: 10000,
+    }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return httpsGetJson(res.headers.location, headers).then(resolve, reject);
+      }
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+        } else {
+          reject(new Error(`github ${res.statusCode}: ${body.slice(0, 200)}`));
+        }
       });
     });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+    req.end();
   });
 }
 
-function firstExisting(candidates) {
-  return candidates.find(exists) || null;
+function downloadToFile(url, dest) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    let finished = false;
+    const fail = (err) => {
+      if (finished) return;
+      finished = true;
+      file.close(() => fs.unlink(dest, () => reject(err)));
+    };
+    const follow = (u, redirects) => {
+      if (redirects > 5) return fail(new Error('too many redirects'));
+      const req = https.get(u, {
+        headers: { 'User-Agent': UA, 'Accept': 'application/octet-stream' },
+        timeout: 60000,
+      }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          return follow(res.headers.location, redirects + 1);
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          return fail(new Error(`download ${res.statusCode} for ${u}`));
+        }
+        res.pipe(file);
+        file.on('finish', () => {
+          if (finished) return;
+          finished = true;
+          file.close((err) => err ? reject(err) : resolve());
+        });
+        res.on('error', fail);
+      });
+      req.on('timeout', () => req.destroy(new Error('timeout')));
+      req.on('error', fail);
+    };
+    file.on('error', fail);
+    follow(url, 0);
+  });
 }
 
-// Read a repo's .cove.json manifest, if it has one.
-// Schema (all fields optional):
-//   {
-//     "name": "Pretty Name",
-//     "icon": "pdf" | "upscale" | "download" | ...,
-//     "category": "cat-media" | "cat-docs" | "cat-utils" | "cat-create",
-//     "description": "One-line tagline.",
-//     "version": "1.2.3",
-//     "entry": "main.py"                            // interpreter inferred from extension
-//        | { "cmd": "cargo", "args": ["run"] }      // explicit command
-//        | { "kind": "appimage", "path": "release/Foo.AppImage" }
-//   }
-function readManifest(dir) {
-  const p = path.join(dir, '.cove.json');
-  if (!exists(p)) return null;
-  try {
-    const raw = fs.readFileSync(p, 'utf8');
-    const m = JSON.parse(raw);
-    return (m && typeof m === 'object') ? m : null;
-  } catch {
-    return null;
-  }
+async function fetchLatestRelease(slug) {
+  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${slug}/releases/latest`;
+  return httpsGetJson(url);
 }
 
-// Resolve manifest.entry to an executable plan, or null if invalid.
-function planFromEntry(dir, entry) {
-  if (!entry) return null;
-  if (typeof entry === 'string') {
-    const abs = path.isAbsolute(entry) ? entry : path.join(dir, entry);
-    if (!exists(abs)) return null;
-    if (/\.py$/i.test(abs))       return { kind: 'python',   cmd: 'python3', args: [abs], cwd: dir };
-    if (/\.sh$/i.test(abs))       return { kind: 'shell',    cmd: 'bash',    args: [abs], cwd: dir };
-    if (/\.AppImage$/i.test(abs)) return { kind: 'appimage', cmd: abs,       args: [],    cwd: dir };
-    if (/\.(js|mjs|cjs)$/i.test(abs)) return { kind: 'node', cmd: 'node',    args: [abs], cwd: dir };
-    return { kind: 'exec', cmd: abs, args: [], cwd: dir };
+async function installOrUpdate(slug, { force = false } = {}) {
+  const dir = programDir(slug);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const release = await fetchLatestRelease(slug);
+  const tag = release?.tag_name || '';
+  const asset = pickAsset(release?.assets);
+  if (!asset) {
+    const plat = process.platform === 'darwin' ? 'macOS' : process.platform;
+    throw new Error(`No ${plat} build available in release ${tag || '(unknown)'}.`);
   }
-  if (typeof entry === 'object') {
-    if (entry.kind === 'appimage' && typeof entry.path === 'string') {
-      const abs = path.isAbsolute(entry.path) ? entry.path : path.join(dir, entry.path);
-      if (!exists(abs)) return null;
-      return { kind: 'appimage', cmd: abs, args: [], cwd: dir };
+
+  const current = readInstalled(slug);
+  const binDir = path.join(dir, 'bin');
+  const final = path.join(binDir, asset.name);
+  if (!force && current && current.tag === tag && exists(final)) {
+    return { ok: true, already: true, tag };
+  }
+
+  fs.mkdirSync(binDir, { recursive: true });
+  const tmp = path.join(binDir, `.${asset.name}.part`);
+  await downloadToFile(asset.browser_download_url, tmp);
+
+  // Remove the previously-installed binary so /bin doesn't accumulate
+  // stale copies of old versions.
+  if (current?.entry) {
+    const prior = path.join(dir, current.entry);
+    if (exists(prior) && prior !== final) {
+      await fsp.rm(prior, { force: true }).catch(() => {});
     }
-    if (typeof entry.cmd === 'string') {
-      return { kind: 'custom', cmd: entry.cmd, args: Array.isArray(entry.args) ? entry.args : [], cwd: dir };
-    }
   }
-  return null;
+  await fsp.rename(tmp, final);
+  if (process.platform === 'linux') {
+    try { fs.chmodSync(final, 0o755); } catch {}
+  }
+
+  writeInstalled(slug, {
+    slug,
+    tag,
+    asset: asset.name,
+    entry: path.relative(dir, final),
+    platform: process.platform,
+    installedAt: new Date().toISOString(),
+  });
+  return { ok: true, tag };
 }
 
-// Walk up to find an AppImage or a clear entry point inside dir.
-function findLauncherPlan(dir, slug) {
-  if (!exists(dir)) return null;
-
-  // 0) .cove.json manifest wins if present and resolves.
-  const manifest = readManifest(dir);
-  if (manifest) {
-    const fromManifest = planFromEntry(dir, manifest.entry);
-    if (fromManifest) return fromManifest;
-  }
-
-  // 1) Prebuilt AppImage under release/ or dist/
-  const releaseDirs = ['release', 'dist', 'build'].map(d => path.join(dir, d));
-  for (const rd of releaseDirs) {
-    if (!exists(rd)) continue;
-    try {
-      const entries = fs.readdirSync(rd, { withFileTypes: true });
-      const appimg = entries
-        .filter(e => e.isFile() && /\.AppImage$/i.test(e.name))
-        .map(e => path.join(rd, e.name))[0];
-      if (appimg) return { kind: 'appimage', cmd: appimg, args: [], cwd: dir };
-    } catch {}
-  }
-
-  // 2) launch.sh at repo root
-  const launchSh = path.join(dir, 'launch.sh');
-  if (exists(launchSh)) return { kind: 'shell', cmd: 'bash', args: [launchSh], cwd: dir };
-
-  // 3) package.json with a start script
-  const pkgPath = path.join(dir, 'package.json');
-  if (exists(pkgPath)) {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-      if (pkg?.scripts?.start) return { kind: 'npm', cmd: 'npm', args: ['start'], cwd: dir };
-      if (pkg?.scripts?.dev)   return { kind: 'npm', cmd: 'npm', args: ['run', 'dev'], cwd: dir };
-    } catch {}
-  }
-
-  // 4) Python entry: <slug>.py or main.py, with underscores accepted
-  const pyCandidates = [
-    path.join(dir, `${slug}.py`),
-    path.join(dir, `${slug.replace(/-/g, '_')}.py`),
-    path.join(dir, 'main.py'),
-    path.join(dir, 'app.py'),
-    path.join(dir, 'src', `${slug.replace(/-/g, '_')}`, '__main__.py'),
-  ];
-  const py = firstExisting(pyCandidates);
-  if (py) return { kind: 'python', cmd: 'python3', args: [py], cwd: dir };
-
-  return null;
+function planFromEntry(absPath) {
+  if (/\.AppImage$/i.test(absPath)) return { cmd: absPath, args: [], kind: 'appimage' };
+  if (/\.exe$/i.test(absPath))      return { cmd: absPath, args: [], kind: 'exe' };
+  if (/\.deb$/i.test(absPath))      return { cmd: 'xdg-open', args: [absPath], kind: 'deb' };
+  return { cmd: absPath, args: [], kind: 'exec' };
 }
+
+// ---------- scan ----------
 
 async function scanOneInstalled(slug) {
-  const dir = programDir(slug);
-  const manifest = readManifest(dir);
-  const url = `https://github.com/${GITHUB_OWNER}/${slug}`;
-  let localSha = '';
-  let remoteSha = '';
-  try { localSha = await git.resolveRef({ fs, dir, ref: 'HEAD' }); } catch {}
+  if (isLegacyInstall(slug)) {
+    return { slug, manifest: null, hasUpdate: true, legacy: true, version: '', latestTag: '' };
+  }
+  const info = readInstalled(slug);
+  if (!info) return { slug, manifest: null, hasUpdate: false, version: '', latestTag: '' };
+  let latestTag = '';
   try {
-    const info = await git.getRemoteInfo({ http: gitHttp, url });
-    const head = info.HEAD || 'refs/heads/main';
-    const branch = head.replace('refs/heads/', '');
-    remoteSha = info.refs?.heads?.[branch] || '';
+    const rel = await fetchLatestRelease(slug);
+    latestTag = rel?.tag_name || '';
   } catch {}
-  const hasUpdate = !!(localSha && remoteSha && localSha !== remoteSha);
-  return { slug, manifest, hasUpdate, localSha, remoteSha };
+  return {
+    slug,
+    manifest: null,
+    hasUpdate: !!(latestTag && info.tag && latestTag !== info.tag),
+    version: info.tag,
+    latestTag,
+  };
 }
 
 // ---------- IPC ----------
@@ -237,14 +305,9 @@ ipcMain.handle('cove:getState', async () => {
       .filter(e => e.isDirectory())
       .map(e => e.name);
   } catch {}
-  return {
-    programsDir: PROGRAMS_DIR,
-    installed,
-  };
+  return { programsDir: PROGRAMS_DIR, installed };
 });
 
-// Rich scan: for every installed slug, read manifest and compare local HEAD to remote.
-// opts: { checkUpdates?: boolean (default true) }
 ipcMain.handle('cove:scan', async (_e, opts = {}) => {
   const checkUpdates = opts.checkUpdates !== false;
   let installedSlugs = [];
@@ -253,32 +316,26 @@ ipcMain.handle('cove:scan', async (_e, opts = {}) => {
       .filter(e => e.isDirectory())
       .map(e => e.name);
   } catch {}
-
   const installed = await Promise.all(installedSlugs.map(async (slug) => {
     if (!checkUpdates) {
-      return { slug, manifest: readManifest(programDir(slug)), hasUpdate: false };
+      const info = readInstalled(slug);
+      return { slug, manifest: null, hasUpdate: false, version: info?.tag || '', legacy: isLegacyInstall(slug) };
     }
     try { return await scanOneInstalled(slug); }
-    catch { return { slug, manifest: readManifest(programDir(slug)), hasUpdate: false }; }
+    catch { return { slug, manifest: null, hasUpdate: false, version: '', latestTag: '' }; }
   }));
-
   return { programsDir: PROGRAMS_DIR, installed };
 });
 
 ipcMain.handle('cove:install', async (_e, slug) => {
   if (!/^[a-z0-9][a-z0-9-]*$/i.test(slug)) return { ok: false, error: 'invalid slug' };
-  const dest = programDir(slug);
-  if (exists(dest)) return { ok: true, already: true };
-  const url = `https://github.com/${GITHUB_OWNER}/${slug}`;
+  if (isLegacyInstall(slug)) {
+    await fsp.rm(programDir(slug), { recursive: true, force: true }).catch(() => {});
+  }
   try {
-    await git.clone({
-      fs, http: gitHttp, dir: dest, url,
-      singleBranch: true, depth: 1,
-    });
-    return { ok: true };
+    return await installOrUpdate(slug, { force: false });
   } catch (err) {
-    // Roll back partial clone so Install can be retried cleanly.
-    await fsp.rm(dest, { recursive: true, force: true }).catch(() => {});
+    await fsp.rm(programDir(slug), { recursive: true, force: true }).catch(() => {});
     return { ok: false, error: String(err?.message || err) };
   }
 });
@@ -286,23 +343,11 @@ ipcMain.handle('cove:install', async (_e, slug) => {
 ipcMain.handle('cove:update', async (_e, slug) => {
   const dir = programDir(slug);
   if (!exists(dir)) return { ok: false, error: 'not installed' };
-  const url = `https://github.com/${GITHUB_OWNER}/${slug}`;
   try {
-    // Determine the default branch from the remote (works even on shallow clones).
-    const info = await git.getRemoteInfo({ http: gitHttp, url });
-    const remoteHeadRef = info.HEAD || 'refs/heads/main';
-    const branch = remoteHeadRef.replace('refs/heads/', '');
-    // Fetch and hard-reset to the remote head. The program dir is a
-    // read-only clone from the user's perspective, so overwriting local
-    // changes is intentional (matches what `git pull --ff-only` + re-clone does).
-    await git.fetch({
-      fs, http: gitHttp, dir, url,
-      ref: branch, singleBranch: true, depth: 1, tags: false,
-    });
-    const remoteSha = await git.resolveRef({ fs, dir, ref: `refs/remotes/origin/${branch}` });
-    await git.writeRef({ fs, dir, ref: `refs/heads/${branch}`, value: remoteSha, force: true });
-    await git.checkout({ fs, dir, ref: branch, force: true });
-    return { ok: true };
+    if (isLegacyInstall(slug)) {
+      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+    return await installOrUpdate(slug, { force: false });
   } catch (err) {
     return { ok: false, error: String(err?.message || err) };
   }
@@ -311,22 +356,39 @@ ipcMain.handle('cove:update', async (_e, slug) => {
 ipcMain.handle('cove:launch', async (_e, slug) => {
   const dir = programDir(slug);
   if (!exists(dir)) return { ok: false, error: 'not installed' };
-  const plan = findLauncherPlan(dir, slug);
-  if (!plan) {
-    return {
-      ok: false,
-      error: `No launcher found in ${dir}. Add a launch.sh, build an AppImage into release/, expose an npm "start" script, or include ${slug}.py at the repo root.`,
-    };
+  if (isLegacyInstall(slug)) {
+    return { ok: false, error: 'This install is from an older Cove Suite. Click Update to reinstall as a binary.' };
   }
+  const info = readInstalled(slug);
+  if (!info?.entry) return { ok: false, error: 'Install info missing. Try reinstalling.' };
+  const entry = path.join(dir, info.entry);
+  if (!exists(entry)) return { ok: false, error: `Missing entry: ${entry}` };
+
+  const plan = planFromEntry(entry);
   try {
     const child = spawn(plan.cmd, plan.args, {
-      cwd: plan.cwd,
+      cwd: dir,
       detached: true,
       stdio: 'ignore',
       env: process.env,
     });
     child.unref();
-    return { ok: true, kind: plan.kind };
+    // Give the OS a beat to surface ENOENT/EACCES synchronously before we
+    // report success. Without this, the old flow always toasted "launched"
+    // even when the binary never actually started.
+    return await new Promise((resolve) => {
+      let settled = false;
+      child.once('error', (err) => {
+        if (settled) return;
+        settled = true;
+        resolve({ ok: false, error: String(err?.message || err) });
+      });
+      setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve({ ok: true, kind: plan.kind });
+      }, 600);
+    });
   } catch (err) {
     return { ok: false, error: String(err?.message || err) };
   }
@@ -352,35 +414,6 @@ ipcMain.handle('cove:window:isMaximized', () => BrowserWindow.getFocusedWindow()
 
 const DISCOVERY_TTL_MS = 5 * 60 * 1000;
 let discoveryCache = { at: 0, data: null };
-
-function httpsGetJson(url, headers = {}) {
-  return new Promise((resolve, reject) => {
-    const https = require('node:https');
-    const req = https.request(url, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'cove-suite-launcher',
-        'Accept': 'application/vnd.github+json',
-        ...headers,
-      },
-      timeout: 8000,
-    }, (res) => {
-      let chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => {
-        const body = Buffer.concat(chunks).toString('utf8');
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
-        } else {
-          reject(new Error(`github ${res.statusCode}: ${body.slice(0, 200)}`));
-        }
-      });
-    });
-    req.on('timeout', () => { req.destroy(new Error('timeout')); });
-    req.on('error', reject);
-    req.end();
-  });
-}
 
 ipcMain.handle('cove:discover', async (_e, opts = {}) => {
   const now = Date.now();

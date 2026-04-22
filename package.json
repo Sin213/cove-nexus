@@ -17,8 +17,7 @@
     "release": "electron-builder --linux --win --publish=always"
   },
   "dependencies": {
-    "electron-updater": "^6.3.9",
-    "isomorphic-git": "^1.37.5"
+    "electron-updater": "^6.3.9"
   },
   "devDependencies": {
     "electron": "^33.2.0",
