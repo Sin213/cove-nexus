@@ -382,6 +382,20 @@
   .update-banner .msg b { color: var(--text); font-weight: 500; }
   .update-banner .msg small { color: var(--text-dim); }
 
+  /* Rate-limit banner — same shape as the update banner but warn-colored */
+  .rate-banner {
+    display: none; align-items: center; gap: 14px;
+    padding: 10px 14px; margin-bottom: 12px;
+    border: 1px solid rgba(255,180,84,0.35);
+    border-radius: 10px;
+    background: rgba(255,180,84,0.08);
+    color: var(--text);
+    font-size: 12.5px;
+  }
+  .rate-banner svg { width: 14px; height: 14px; color: var(--warn); flex-shrink: 0; }
+  .rate-banner .msg { flex: 1; }
+  .rate-banner .msg b { color: var(--warn); font-weight: 500; }
+
   /* Tweaks panel */
   .tweaks-panel {
     position: fixed; right: 20px; bottom: 20px; z-index: 60;
@@ -541,6 +555,12 @@
           </div>
         </div>
 
+        <!-- Rate-limit banner -->
+        <div class="rate-banner" id="rate-banner">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+          <div class="msg"><b>Rate limit reached.</b> <span id="rate-banner-text"></span></div>
+        </div>
+
         <!-- Update banner -->
         <div class="update-banner" id="update-banner">
           <div class="spin">
@@ -648,6 +668,17 @@
       </div>
     </div>
 
+    <div class="row">
+      <div class="row-label">GitHub token <span style="font-weight:400;color:var(--text-faint);text-transform:none;letter-spacing:0;">— optional, bumps rate limit 60/hr → 5000/hr. <a href="https://github.com/settings/tokens?type=beta" target="_blank" style="color:var(--accent);">Create one</a> (read-only public_repo).</span></div>
+      <div class="row-value">
+        <input id="settings-token" type="password" placeholder="ghp_… or github_pat_…" autocomplete="off" spellcheck="false"
+          style="flex:1;min-width:0;font-family:'Geist Mono',monospace;font-size:12px;color:var(--text);background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:8px 10px;outline:none;" />
+        <button id="settings-token-save">Save</button>
+        <button id="settings-token-clear">Clear</button>
+      </div>
+      <div id="settings-token-status" style="font-size:11.5px;color:var(--text-faint);"></div>
+    </div>
+
     <div class="actions">
       <button id="settings-close" class="primary">Done</button>
     </div>
@@ -674,7 +705,7 @@
 
 <!-- Data & behavior -->
 <script src="assets/programs.js?v=2"></script>
-<script src="assets/launcher.js?v=6"></script>
+<script src="assets/launcher.js?v=7"></script>
 
 </body>
 </html>

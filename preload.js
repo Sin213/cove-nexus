@@ -16,11 +16,15 @@ contextBridge.exposeInMainWorld('coveAPI', {
   unpin:          (slug) => ipcRenderer.invoke('cove:unpin', slug),
   setCustomPath:  (slug) => ipcRenderer.invoke('cove:setCustomPath', slug),
 
+  refresh:            () => ipcRenderer.invoke('cove:refresh'),
+  rateLimit:          () => ipcRenderer.invoke('cove:rateLimit'),
+
   config: {
     get:                 () => ipcRenderer.invoke('cove:config:get'),
     setProgramsRoot:     () => ipcRenderer.invoke('cove:config:setProgramsRoot'),
     revealConfigDir:     () => ipcRenderer.invoke('cove:config:revealConfigDir'),
     revealProgramsRoot:  () => ipcRenderer.invoke('cove:config:revealProgramsRoot'),
+    setGithubToken:      (tok) => ipcRenderer.invoke('cove:config:setGithubToken', tok),
   },
 
   win: {
