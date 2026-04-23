@@ -23,6 +23,8 @@
     manifests: {},
     remoteUpdates: new Set(),
     appVersion: '',
+    rateLimitedUntil: 0,
+    hasGithubToken: false,
   };
 
   function iconFor(name) {
@@ -574,6 +576,7 @@
       state.onDisk = new Set((s.installed || []).map(x => x.slug));
       state.manifests = {};
       state.remoteUpdates = new Set();
+      state.rateLimitedUntil = s.rateLimitedUntil || 0;
       for (const row of s.installed || []) {
         if (row.manifest) state.manifests[row.slug] = row.manifest;
         if (row.hasUpdate) state.remoteUpdates.add(row.slug);
@@ -586,16 +589,39 @@
           if (row.version) prog.version = row.version.replace(/^v/, '');
         }
       }
+      renderRateLimitBanner();
     } catch (e) {
-      toast(`Scan failed: ${e.message}`, 'error');
+      // Don't spam the toast while we're rate-limited — the banner is enough.
+      if (!/rate-limited/i.test(e.message || '')) {
+        toast(`Scan failed: ${e.message}`, 'error');
+      }
+      renderRateLimitBanner();
     }
   }
 
-  async function doRefresh() {
+  function renderRateLimitBanner() {
+    const banner = document.getElementById('rate-banner');
+    const text = document.getElementById('rate-banner-text');
+    if (!banner || !text) return;
+    const until = state.rateLimitedUntil || 0;
+    if (!until || Date.now() >= until) { banner.style.display = 'none'; return; }
+    const when = new Date(until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const tokenMsg = state.hasGithubToken
+      ? ' Even with a token, you\'re at the limit — try again shortly.'
+      : ' Add a GitHub token in Settings for a higher limit (5000/hr instead of 60/hr).';
+    text.textContent = `GitHub rate-limited until ${when}.${tokenMsg}`;
+    banner.style.display = 'flex';
+  }
+
+  async function doRefresh(opts = {}) {
     const btn = document.getElementById('btn-refresh');
     if (btn && btn.classList.contains('spinning')) return;
     btn?.classList.add('spinning');
     try {
+      // Manual refresh force-clears the GitHub cache; auto-refresh doesn't.
+      if (opts.force !== false && IS_DESKTOP) {
+        try { await coveAPI.refresh(); } catch {}
+      }
       await rescan();
       await discoverAndMerge({ force: true });
       render();
@@ -617,6 +643,13 @@
       const cfg = await coveAPI.config.get();
       if (settingsPath) settingsPath.textContent = cfg.programsRoot || '—';
       if (settingsConfigPath) settingsConfigPath.textContent = cfg.userData || '—';
+      state.hasGithubToken = !!cfg.hasGithubToken;
+      state.rateLimitedUntil = cfg.rateLimitedUntil || state.rateLimitedUntil || 0;
+      const statusEl = document.getElementById('settings-token-status');
+      const tokenInput = document.getElementById('settings-token');
+      if (tokenInput) tokenInput.value = cfg.hasGithubToken ? '••••••••••••••••' : '';
+      if (statusEl) statusEl.textContent = cfg.hasGithubToken ? 'Token saved. Cleared cache; next scan uses the token.' : 'No token set — using 60/hr unauthenticated limit.';
+      renderRateLimitBanner();
     } catch {}
   }
   function openSettings() {
@@ -652,6 +685,39 @@
   });
   document.getElementById('settings-open-config')?.addEventListener('click', () => {
     if (IS_DESKTOP) coveAPI.config.revealConfigDir();
+  });
+  document.getElementById('settings-token-save')?.addEventListener('click', async () => {
+    if (!IS_DESKTOP) return;
+    const input = document.getElementById('settings-token');
+    const val = (input?.value || '').trim();
+    // The placeholder dots mean "token already saved, left untouched". Don't
+    // overwrite a real token with masked dots.
+    if (/^•+$/.test(val)) return;
+    if (!val) return;
+    try {
+      const res = await coveAPI.config.setGithubToken(val);
+      if (!res?.ok) throw new Error('save failed');
+      toast('GitHub token saved — cache cleared.');
+      if (input) input.value = '••••••••••••••••';
+      await refreshSettingsPaths();
+      await rescan();
+      render();
+    } catch (e) {
+      toast(`Couldn't save token: ${e.message}`, 'error');
+    }
+  });
+  document.getElementById('settings-token-clear')?.addEventListener('click', async () => {
+    if (!IS_DESKTOP) return;
+    try {
+      const res = await coveAPI.config.setGithubToken('');
+      if (!res?.ok) throw new Error('clear failed');
+      toast('GitHub token cleared.');
+      const input = document.getElementById('settings-token');
+      if (input) input.value = '';
+      await refreshSettingsPaths();
+    } catch (e) {
+      toast(`Couldn't clear token: ${e.message}`, 'error');
+    }
   });
 
   // Pin-version modal
@@ -768,14 +834,17 @@
     }
   });
 
-  // Auto-refresh: every 10 min, and when window regains focus (after being > 30s idle).
+  // Auto-refresh is intentionally conservative to stay under the GitHub
+  // unauthenticated rate limit (60/hr) with ~9 installed tools. Main
+  // process caches each /releases/latest response for 10 min, so even a
+  // manual refresh between ticks costs nothing.
   if (IS_DESKTOP) {
-    const TEN_MIN = 10 * 60 * 1000;
-    setInterval(() => { doRefresh(); }, TEN_MIN);
+    const THIRTY_MIN = 30 * 60 * 1000;
+    setInterval(() => { doRefresh({ force: false }); }, THIRTY_MIN);
     let lastBlur = 0;
     window.addEventListener('blur', () => { lastBlur = Date.now(); });
     window.addEventListener('focus', () => {
-      if (lastBlur && Date.now() - lastBlur > 30 * 1000) doRefresh();
+      if (lastBlur && Date.now() - lastBlur > 10 * 60 * 1000) doRefresh({ force: false });
     });
   }
 

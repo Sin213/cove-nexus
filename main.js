@@ -125,9 +125,10 @@ function readConfig() {
       programsRoot: typeof c?.programsRoot === 'string' && c.programsRoot
         ? c.programsRoot
         : defaultProgramsRoot(),
+      githubToken: typeof c?.githubToken === 'string' ? c.githubToken : '',
     };
   } catch {
-    const c = { programsRoot: defaultProgramsRoot() };
+    const c = { programsRoot: defaultProgramsRoot(), githubToken: '' };
     writeConfig(c);
     return c;
   }
@@ -315,14 +316,54 @@ function isLegacyClone(slug) {
 // ---------- https ----------
 
 function ghHeaders() {
-  return {
+  const h = {
     'User-Agent': UA,
     'Accept': 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
   };
+  const tok = readConfig().githubToken;
+  if (tok) h.Authorization = `Bearer ${tok}`;
+  return h;
 }
 
-function httpsGetJson(url, headers = {}) {
+// In-memory cache, keyed by URL. Aggressive caching is the main defense
+// against hitting the 60/hr unauthenticated rate limit while the user
+// pokes at the UI.
+const API_TTL_MS = 5 * 60 * 1000;
+const apiCache = new Map();  // url -> { at, data }
+// When we observe rate-limit headers, block outbound calls until this ms.
+// Callers fall back to cached data if they have any.
+let rateLimitUntil = 0;
+let rateLimitAuthed = false;  // whether the limit we hit was on an authed request
+
+function cacheGet(url) {
+  const ent = apiCache.get(url);
+  if (!ent) return null;
+  if (Date.now() - ent.at > API_TTL_MS) { apiCache.delete(url); return null; }
+  return ent.data;
+}
+
+function cacheSet(url, data) { apiCache.set(url, { at: Date.now(), data }); }
+
+function clearApiCache() { apiCache.clear(); rateLimitUntil = 0; }
+
+function recordRateLimit(res) {
+  const remaining = parseInt(res.headers['x-ratelimit-remaining'] || '-1', 10);
+  const resetSec = parseInt(res.headers['x-ratelimit-reset'] || '0', 10);
+  if (remaining === 0 && resetSec > 0) {
+    rateLimitUntil = resetSec * 1000;
+    rateLimitAuthed = !!readConfig().githubToken;
+  }
+}
+
+function httpsGetJson(url, headers = {}, { allowCache = true } = {}) {
+  if (allowCache) {
+    const cached = cacheGet(url);
+    if (cached) return Promise.resolve(cached);
+  }
+  if (Date.now() < rateLimitUntil) {
+    return Promise.reject(new Error(`github rate-limited until ${new Date(rateLimitUntil).toLocaleTimeString()}`));
+  }
   return new Promise((resolve, reject) => {
     const req = https.request(url, {
       method: 'GET',
@@ -331,17 +372,35 @@ function httpsGetJson(url, headers = {}) {
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
-        return httpsGetJson(res.headers.location, headers).then(resolve, reject);
+        return httpsGetJson(res.headers.location, headers, { allowCache: false }).then(resolve, reject);
       }
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
+        recordRateLimit(res);
         const body = Buffer.concat(chunks).toString('utf8');
         if (res.statusCode >= 200 && res.statusCode < 300) {
-          try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
-        } else {
-          reject(new Error(`github ${res.statusCode}: ${body.slice(0, 200)}`));
+          try {
+            const parsed = JSON.parse(body);
+            cacheSet(url, parsed);
+            resolve(parsed);
+          } catch (e) { reject(e); }
+          return;
         }
+        // 403 with rate-limit exhaustion is the common case here; be
+        // explicit so the UI can surface "try again at X:YY" instead of a
+        // generic error.
+        if (res.statusCode === 403 && /rate limit/i.test(body)) {
+          if (!rateLimitUntil) {
+            // Fall back to a 1-hour window if the server didn't send reset.
+            rateLimitUntil = Date.now() + 60 * 60 * 1000;
+            rateLimitAuthed = !!readConfig().githubToken;
+          }
+          const cached = cacheGet(url);
+          if (cached) return resolve(cached);
+          return reject(new Error(`github rate-limited until ${new Date(rateLimitUntil).toLocaleTimeString()}`));
+        }
+        reject(new Error(`github ${res.statusCode}: ${body.slice(0, 200)}`));
       });
     });
     req.on('timeout', () => req.destroy(new Error('timeout')));
@@ -508,7 +567,21 @@ ipcMain.handle('cove:config:get', () => {
     programsRoot: cfg.programsRoot,
     userData: USER_DATA,
     defaultRoot: defaultProgramsRoot(),
+    // Don't leak the token to the renderer — only whether one is set.
+    hasGithubToken: !!cfg.githubToken,
+    rateLimitedUntil: rateLimitUntil,
   };
+});
+
+ipcMain.handle('cove:config:setGithubToken', (_e, token) => {
+  const cfg = readConfig();
+  cfg.githubToken = typeof token === 'string' ? token.trim() : '';
+  writeConfig(cfg);
+  // A new token resets our view of the rate limit (authed and unauthed
+  // buckets are separate) and invalidates cache so next call uses the
+  // new credentials.
+  clearApiCache();
+  return { ok: true, hasGithubToken: !!cfg.githubToken };
 });
 
 ipcMain.handle('cove:config:setProgramsRoot', async () => {
@@ -592,7 +665,7 @@ ipcMain.handle('cove:scan', async (_e, opts = {}) => {
     } catch {}
   }
 
-  return { programsRoot: readConfig().programsRoot, installed: rows };
+  return { programsRoot: readConfig().programsRoot, installed: rows, rateLimitedUntil: rateLimitUntil };
 });
 
 ipcMain.handle('cove:install', async (_e, slug) => {
@@ -795,16 +868,11 @@ ipcMain.handle('cove:window:isMaximized', () => BrowserWindow.getFocusedWindow()
 
 // ---------- GitHub discovery ----------
 
-const DISCOVERY_TTL_MS = 5 * 60 * 1000;
-let discoveryCache = { at: 0, data: null };
-
 ipcMain.handle('cove:discover', async (_e, opts = {}) => {
-  const now = Date.now();
-  if (!opts.force && discoveryCache.data && (now - discoveryCache.at) < DISCOVERY_TTL_MS) {
-    return { ok: true, cached: true, repos: discoveryCache.data };
-  }
+  const url = `https://api.github.com/users/${GITHUB_OWNER}/repos?per_page=100&sort=updated`;
+  if (opts.force) apiCache.delete(url);
   try {
-    const repos = await httpsGetJson(`https://api.github.com/users/${GITHUB_OWNER}/repos?per_page=100&sort=updated`);
+    const repos = await httpsGetJson(url);
     const mapped = (repos || [])
       .filter(r => typeof r?.name === 'string' && /^cove-/i.test(r.name) && r.name !== GITHUB_REPO && !r.archived && !r.disabled)
       .map(r => ({
@@ -816,12 +884,24 @@ ipcMain.handle('cove:discover', async (_e, opts = {}) => {
         version: '',
         fork: !!r.fork,
       }));
-    discoveryCache = { at: now, data: mapped };
-    return { ok: true, cached: false, repos: mapped };
+    return { ok: true, repos: mapped, rateLimitedUntil: rateLimitUntil };
   } catch (err) {
-    return { ok: false, error: String(err?.message || err) };
+    return { ok: false, error: String(err?.message || err), rateLimitedUntil: rateLimitUntil };
   }
 });
+
+// Explicit cache-clear + rate-limit state probe. Refresh button calls this
+// before rescan so manual refresh actually hits GitHub.
+ipcMain.handle('cove:refresh', () => {
+  clearApiCache();
+  return { ok: true };
+});
+
+ipcMain.handle('cove:rateLimit', () => ({
+  until: rateLimitUntil,
+  authed: rateLimitAuthed,
+  tokenSet: !!readConfig().githubToken,
+}));
 
 function prettyName(slug) {
   return slug.split('-').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
