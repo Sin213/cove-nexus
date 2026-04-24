@@ -17,11 +17,13 @@
   let state = {
     filter: 'all',
     busy: {},
+    progress: {},
     installedOverride: {},
     updated: {},
     onDisk: new Set(),
     manifests: {},
     remoteUpdates: new Set(),
+    releaseNotes: {},
     appVersion: '',
     rateLimitedUntil: 0,
     hasGithubToken: false,
@@ -81,6 +83,64 @@
       .replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  function fmtBytes(n) {
+    if (!n || !Number.isFinite(n)) return '';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+    return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  }
+
+  function progressHtml(p) {
+    const prog = state.progress[p.slug];
+    if (!prog) return '';
+    const phaseLabel = {
+      resolving: 'Finding release…',
+      download:  'Downloading',
+      verify:    'Verifying checksum…',
+      install:   'Installing…',
+      done:      'Done',
+      error:     'Failed',
+    }[prog.phase] || 'Working…';
+    const hasTotal = prog.total && prog.total > 0;
+    const pct = hasTotal ? Math.min(100, Math.round((prog.received / prog.total) * 100)) : 0;
+    const indet = prog.phase !== 'download' || !hasTotal;
+    const right = prog.phase === 'download' && hasTotal
+      ? `${fmtBytes(prog.received)} / ${fmtBytes(prog.total)} · ${pct}%`
+      : prog.phase === 'download' ? fmtBytes(prog.received) : '';
+    return `
+      <div class="card-progress ${indet ? 'indeterminate' : ''}">
+        <div class="row">
+          <span class="phase">${phaseLabel}</span>
+          <span>${right}</span>
+        </div>
+        <div class="bar"><div class="fill" style="width:${indet ? 40 : pct}%"></div></div>
+      </div>`;
+  }
+
+  function releaseNotesHtml(p) {
+    const n = state.releaseNotes[p.slug];
+    if (!n) return '';
+    const url = n.url || `https://github.com/Sin213/${p.slug}/releases/latest`;
+    const tag = n.tag ? `Latest: <b>${escapeAttr(n.tag)}</b>` : 'Latest';
+    const body = (n.body || '').trim();
+    let bodyHtml = '';
+    if (body) {
+      const clipped = body.length > 280 ? body.slice(0, 280) + '…' : body;
+      bodyHtml = `<div class="notes-body">${escapeAttr(clipped)}</div>`;
+    } else {
+      bodyHtml = `<div class="notes-body empty">No release notes for this version.</div>`;
+    }
+    return `
+      <div class="card-notes">
+        <div class="notes-head">
+          <span>${tag}</span>
+          <a href="${escapeAttr(url)}" target="_blank" rel="noopener">more…</a>
+        </div>
+        ${bodyHtml}
+      </div>`;
+  }
+
   function card(p) {
     const installed = isInstalled(p);
     const update = hasUpdate(p);
@@ -88,7 +148,6 @@
     const status = statusFor(p);
     const busy = state.busy[p.slug];
 
-    const categoryLabel = categoryLabels[p.category] || '';
     const description = p.desc || '';
 
     const updateBtnHtml = (installed && update && !busy)
@@ -108,9 +167,10 @@
           </div>
         </div>
 
-        ${categoryLabel ? `<div class="card-meta"><span class="chip">${categoryLabel}</span></div>` : ''}
-
         <div class="card-desc" title="${escapeAttr(description)}">${description}</div>
+
+        ${progressHtml(p)}
+        ${releaseNotesHtml(p)}
 
         <div class="card-bottom">
           <span class="status-pill ${status.kind}" title="${status.kind === 'update' ? 'Update available' : status.kind === 'ok' ? 'Up to date' : 'Not installed'}">
@@ -502,8 +562,49 @@
   `;
   document.head.appendChild(style);
 
+  // ——— install progress stream ———
+  // Full re-renders on every chunk would thrash the DOM, so we mutate the
+  // one progress block in-place and fall back to render() on phase changes.
+  function patchProgressInPlace(slug) {
+    const cardEl = grid.querySelector(`.card[data-slug="${slug}"]`);
+    if (!cardEl) return false;
+    const existing = cardEl.querySelector('.card-progress');
+    const html = progressHtml(window.PROGRAMS.find(p => p.slug === slug) || { slug });
+    if (!existing && html) { cardEl.querySelector('.card-desc')?.insertAdjacentHTML('afterend', html); return true; }
+    if (existing && !html) { existing.remove(); return true; }
+    if (existing && html) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      const fresh = tmp.firstElementChild;
+      if (fresh) existing.replaceWith(fresh);
+      return true;
+    }
+    return false;
+  }
+
+  if (IS_DESKTOP && coveAPI.onInstallProgress) {
+    let lastPhase = {};
+    coveAPI.onInstallProgress((ev) => {
+      if (!ev?.slug) return;
+      const prev = state.progress[ev.slug];
+      state.progress[ev.slug] = {
+        phase: ev.phase,
+        received: ev.received || 0,
+        total: ev.total || (prev?.total || 0),
+      };
+      if (ev.phase === 'done' || ev.phase === 'error') {
+        // Clear after a beat so the bar momentarily shows "Done" / "Failed".
+        setTimeout(() => { delete state.progress[ev.slug]; render(); }, 400);
+      }
+      const phaseChanged = lastPhase[ev.slug] !== ev.phase;
+      lastPhase[ev.slug] = ev.phase;
+      if (phaseChanged) render();
+      else patchProgressInPlace(ev.slug);
+    });
+  }
+
   // ——— window controls ———
-  document.querySelectorAll('.traffic span[data-wbtn]').forEach(btn => {
+  document.querySelectorAll('.traffic [data-wbtn]').forEach(btn => {
     btn.addEventListener('click', () => {
       if (!IS_DESKTOP) return;
       const w = btn.dataset.wbtn;
@@ -569,6 +670,22 @@
     prog.hasManifest = true;
   }
 
+  async function fetchAllReleaseNotes() {
+    if (!IS_DESKTOP || !coveAPI.latestReleases) return;
+    try {
+      const slugs = window.PROGRAMS.map(p => p.slug);
+      const res = await coveAPI.latestReleases(slugs);
+      if (!res?.ok) return;
+      for (const [slug, info] of Object.entries(res.releases || {})) {
+        state.releaseNotes[slug] = info;
+        const prog = window.PROGRAMS.find(p => p.slug === slug);
+        if (prog && info.tag) prog.latestTag = info.tag;
+      }
+    } catch {
+      // Rate-limited / offline — the banner already tells the user.
+    }
+  }
+
   async function rescan() {
     if (!IS_DESKTOP) return;
     try {
@@ -580,6 +697,7 @@
       for (const row of s.installed || []) {
         if (row.manifest) state.manifests[row.slug] = row.manifest;
         if (row.hasUpdate) state.remoteUpdates.add(row.slug);
+        if (row.releaseNotes) state.releaseNotes[row.slug] = row.releaseNotes;
         const prog = window.PROGRAMS.find(p => p.slug === row.slug);
         if (prog && row.manifest) applyManifest(prog, row.manifest);
         if (prog) {
@@ -624,6 +742,7 @@
       }
       await rescan();
       await discoverAndMerge({ force: true });
+      await fetchAllReleaseNotes();
       render();
     } finally {
       btn?.classList.remove('spinning');
@@ -649,8 +768,62 @@
       const tokenInput = document.getElementById('settings-token');
       if (tokenInput) tokenInput.value = cfg.hasGithubToken ? '••••••••••••••••' : '';
       if (statusEl) statusEl.textContent = cfg.hasGithubToken ? 'Token saved. Cleared cache; next scan uses the token.' : 'No token set — using 60/hr unauthenticated limit.';
+
+      const prefMTT   = document.getElementById('pref-minimize-to-tray');
+      const prefSM    = document.getElementById('pref-start-minimized');
+      const prefLOS   = document.getElementById('pref-launch-on-startup');
+      const prefNote  = document.getElementById('pref-launch-note');
+      if (prefMTT)  prefMTT.checked  = !!cfg.minimizeToTray;
+      if (prefSM)   prefSM.checked   = !!cfg.startMinimized;
+      if (prefLOS)  prefLOS.checked  = !!cfg.launchOnStartup;
+      // Linux has no native login-item — grey the checkbox and explain.
+      if (prefLOS && cfg.platform === 'linux') {
+        prefLOS.disabled = true;
+        if (prefNote) prefNote.textContent = '— Linux: add Cove Nexus to your desktop environment\'s autostart manually.';
+      }
       renderRateLimitBanner();
     } catch {}
+  }
+
+  async function savePrefs(patch) {
+    if (!IS_DESKTOP) return;
+    try { await coveAPI.config.setPreferences(patch); }
+    catch (e) { toast(`Couldn't save setting: ${e.message}`, 'error'); }
+  }
+  document.getElementById('pref-minimize-to-tray')?.addEventListener('change', (e) => savePrefs({ minimizeToTray: e.target.checked }));
+  document.getElementById('pref-start-minimized')?.addEventListener('change',  (e) => savePrefs({ startMinimized: e.target.checked }));
+  document.getElementById('pref-launch-on-startup')?.addEventListener('change', (e) => savePrefs({ launchOnStartup: e.target.checked }));
+
+  // Tray → "Check for updates"
+  if (IS_DESKTOP && coveAPI.onTrayCheckUpdates) {
+    coveAPI.onTrayCheckUpdates(() => { doRefresh({ force: true }); });
+  }
+
+  // Portable-only: new-version banner. Setup.exe and AppImage auto-update
+  // silently; Portable users need a nudge.
+  if (IS_DESKTOP && coveAPI.onSelfUpdateAvailable) {
+    coveAPI.onSelfUpdateAvailable((payload) => {
+      if (!payload?.version) return;
+      const dismissed = (() => {
+        try { return localStorage.getItem('cove-self-update-dismissed') === payload.version; }
+        catch { return false; }
+      })();
+      if (dismissed) return;
+      const banner = document.getElementById('self-update-banner');
+      const verEl = document.getElementById('self-update-version');
+      const dl = document.getElementById('self-update-download');
+      const notes = document.getElementById('self-update-notes');
+      const close = document.getElementById('self-update-dismiss');
+      if (!banner) return;
+      if (verEl) verEl.textContent = `v${payload.version}`;
+      if (dl) dl.onclick = () => window.open(payload.downloadUrl || payload.htmlUrl, '_blank');
+      if (notes) notes.onclick = () => window.open(payload.htmlUrl, '_blank');
+      if (close) close.onclick = () => {
+        try { localStorage.setItem('cove-self-update-dismissed', payload.version); } catch {}
+        banner.classList.remove('show');
+      };
+      banner.classList.add('show');
+    });
   }
   function openSettings() {
     if (!settingsOverlay) return;
@@ -857,7 +1030,9 @@
     }
     await rescan();
     render();
-    discoverAndMerge();
+    await discoverAndMerge();
+    await fetchAllReleaseNotes();
+    render();
   }
   init();
 })();

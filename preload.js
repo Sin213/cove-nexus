@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('coveAPI', {
   revealInstall:  (slug) => ipcRenderer.invoke('cove:revealInstall', slug),
   discover:       (opts) => ipcRenderer.invoke('cove:discover', opts || {}),
   releases:           (slug) => ipcRenderer.invoke('cove:releases', slug),
+  latestReleases:     (slugs) => ipcRenderer.invoke('cove:latestReleases', slugs),
   confirmUpdateAll:   (names) => ipcRenderer.invoke('cove:confirmUpdateAll', names),
   pin:            (slug, tag) => ipcRenderer.invoke('cove:pin', slug, tag),
   unpin:          (slug) => ipcRenderer.invoke('cove:unpin', slug),
@@ -19,12 +20,31 @@ contextBridge.exposeInMainWorld('coveAPI', {
   refresh:            () => ipcRenderer.invoke('cove:refresh'),
   rateLimit:          () => ipcRenderer.invoke('cove:rateLimit'),
 
+  onInstallProgress: (cb) => {
+    const h = (_e, payload) => cb(payload);
+    ipcRenderer.on('cove:install:progress', h);
+    return () => ipcRenderer.removeListener('cove:install:progress', h);
+  },
+
   config: {
     get:                 () => ipcRenderer.invoke('cove:config:get'),
     setProgramsRoot:     () => ipcRenderer.invoke('cove:config:setProgramsRoot'),
     revealConfigDir:     () => ipcRenderer.invoke('cove:config:revealConfigDir'),
     revealProgramsRoot:  () => ipcRenderer.invoke('cove:config:revealProgramsRoot'),
     setGithubToken:      (tok) => ipcRenderer.invoke('cove:config:setGithubToken', tok),
+    setPreferences:      (prefs) => ipcRenderer.invoke('cove:config:setPreferences', prefs),
+  },
+
+  onTrayCheckUpdates: (cb) => {
+    const h = () => cb();
+    ipcRenderer.on('cove:tray:checkUpdates', h);
+    return () => ipcRenderer.removeListener('cove:tray:checkUpdates', h);
+  },
+
+  onSelfUpdateAvailable: (cb) => {
+    const h = (_e, payload) => cb(payload);
+    ipcRenderer.on('cove:self:updateAvailable', h);
+    return () => ipcRenderer.removeListener('cove:self:updateAvailable', h);
   },
 
   win: {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -29,6 +29,10 @@ const LEGACY_PROGRAMS = path.join(LEGACY_ROOT, 'programs');
 fs.mkdirSync(USER_DATA, { recursive: true });
 
 let mainWindow = null;
+let tray = null;
+// Flipped to true only from the tray "Quit" item so the close handler can
+// distinguish "user really wants out" from "user clicked ×".
+app.isQuitting = false;
 
 function defaultProgramsRoot() {
   if (process.platform === 'win32') {
@@ -43,6 +47,7 @@ function defaultProgramsRoot() {
 }
 
 function createWindow() {
+  const cfg = readConfig();
   const win = new BrowserWindow({
     width: 1480,
     height: 920,
@@ -64,19 +69,88 @@ function createWindow() {
   win.setMenuBarVisibility(false);
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // Hold the window hidden until the renderer has painted, so users don't
-  // see a black flash while the page loads.
-  win.once('ready-to-show', () => win.show());
+  // see a black flash while the page loads. If startMinimized is on we
+  // never call show() — the user surfaces it from the tray.
+  win.once('ready-to-show', () => {
+    // Only honor startMinimized if we have a tray to surface from —
+    // otherwise the user would have no way to bring the window back.
+    if (cfg.startMinimized && tray) return;
+    win.show();
+  });
   mainWindow = win;
   win.on('page-title-updated', (e) => e.preventDefault());
   win.on('closed', () => { if (mainWindow === win) mainWindow = null; });
+  win.on('close', (e) => {
+    const c = readConfig();
+    if (!app.isQuitting && c.minimizeToTray && tray) {
+      e.preventDefault();
+      win.hide();
+    }
+  });
   win.on('maximize', () => win.webContents.send('cove:window:stateChanged', { maximized: true }));
   win.on('unmaximize', () => win.webContents.send('cove:window:stateChanged', { maximized: false }));
+}
+
+function showMainWindow() {
+  if (!mainWindow) { createWindow(); return; }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+function setupTray() {
+  if (tray) return;
+  try {
+    const iconPath = path.join(__dirname, 'renderer', 'assets', 'cove_icon.png');
+    let img = nativeImage.createFromPath(iconPath);
+    if (!img.isEmpty()) {
+      // 16px works on Windows and most Linux trays; macOS uses template images,
+      // but macOS isn't a shipping target so we don't branch for it.
+      img = img.resize({ width: 16, height: 16 });
+    }
+    tray = new Tray(img);
+    tray.setToolTip('Cove Nexus');
+    const menu = Menu.buildFromTemplate([
+      { label: 'Show Cove Nexus', click: () => showMainWindow() },
+      { label: 'Check for updates',
+        click: () => {
+          showMainWindow();
+          try { mainWindow?.webContents.send('cove:tray:checkUpdates'); } catch {}
+        } },
+      { type: 'separator' },
+      { label: 'Quit', click: () => { app.isQuitting = true; app.quit(); } },
+    ]);
+    tray.setContextMenu(menu);
+    tray.on('click', () => showMainWindow());
+  } catch (err) {
+    // Tray is optional — some Linux distros ship without a SNI host.
+    console.error('[cove-tray]', err?.message || err);
+    tray = null;
+  }
+}
+
+// Login item (launch on startup). Electron handles this natively on
+// Windows and macOS; on Linux it's a noop — systemd user units or an
+// autostart .desktop file would be needed, and we don't write either.
+function applyLoginItem(cfg) {
+  if (process.platform === 'linux') return;
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: !!cfg.launchOnStartup,
+      openAsHidden: !!cfg.startMinimized,
+    });
+  } catch (err) {
+    console.error('[cove-loginitem]', err?.message || err);
+  }
 }
 
 app.whenReady().then(() => {
   migrateLegacyInstalls();
   ensureProgramsRoot();
   adoptFromProgramsRoot();
+  const cfg = readConfig();
+  applyLoginItem(cfg);
+  setupTray();
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -84,11 +158,21 @@ app.whenReady().then(() => {
   setupAutoUpdater();
 });
 
+app.on('before-quit', () => { app.isQuitting = true; });
+
+// Windows Portable builds can't auto-update (electron-updater has no
+// portable target support), so we detect that case and fall through to
+// a polite "new version available" prompt in the UI instead.
+function isWindowsPortable() {
+  return process.platform === 'win32' && !!process.env.PORTABLE_EXECUTABLE_FILE;
+}
+
 // Silent auto-update: packaged builds only. Checks on boot and hourly.
 // When an update is downloaded, the app relaunches itself immediately.
 // No prompt. No toast. Configured against github.com/Sin213/cove-nexus releases.
 function setupAutoUpdater() {
   if (!app.isPackaged) return;
+  if (isWindowsPortable()) { setupPortableUpdateNotifier(); return; }
   let autoUpdater;
   try { ({ autoUpdater } = require('electron-updater')); }
   catch { return; }
@@ -104,6 +188,55 @@ function setupAutoUpdater() {
   const check = () => autoUpdater.checkForUpdates().catch(() => {});
   check();
   setInterval(check, 60 * 60 * 1000);
+}
+
+// Portable-only: poll GitHub for a newer cove-nexus release and notify the
+// renderer. The user dismisses the banner per-version; we don't download
+// anything (portable means "user is the installer").
+function setupPortableUpdateNotifier() {
+  const currentVersion = app.getVersion();
+  const check = async () => {
+    try {
+      const rel = await httpsGetJson(
+        `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`,
+        {},
+        { allowCache: false }  // always fresh; the normal cache is fine for tool releases
+      );
+      const latestTag = rel?.tag_name || '';
+      const latestVer = latestTag.replace(/^v/, '');
+      if (!latestVer || !isNewerSemver(latestVer, currentVersion)) return;
+      // Find the Portable.exe asset so the banner can link straight to it.
+      const portableAsset = (rel?.assets || []).find(a => /-Portable\.exe$/i.test(a?.name || ''));
+      const payload = {
+        version: latestVer,
+        tag: latestTag,
+        notes: (rel?.body || '').replace(/<!--[\s\S]*?-->/g, '').trim().slice(0, 400),
+        htmlUrl: rel?.html_url || `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`,
+        downloadUrl: portableAsset?.browser_download_url || '',
+      };
+      try { mainWindow?.webContents.send('cove:self:updateAvailable', payload); } catch {}
+    } catch (err) {
+      // Network hiccups are fine; we'll try again next tick.
+      console.warn('[cove-portable-update]', err?.message || err);
+    }
+  };
+  // Wait for the renderer before the first poke so the banner can actually
+  // display when we find an update on cold start.
+  app.once('browser-window-created', (_e, win) => {
+    win.webContents.once('did-finish-load', check);
+  });
+  setInterval(check, 60 * 60 * 1000);
+}
+
+function isNewerSemver(a, b) {
+  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x > y) return true;
+    if (x < y) return false;
+  }
+  return false;
 }
 
 app.on('window-all-closed', () => {
@@ -126,9 +259,18 @@ function readConfig() {
         ? c.programsRoot
         : defaultProgramsRoot(),
       githubToken: typeof c?.githubToken === 'string' ? c.githubToken : '',
+      minimizeToTray: c?.minimizeToTray !== false,  // default on
+      startMinimized: !!c?.startMinimized,
+      launchOnStartup: !!c?.launchOnStartup,
     };
   } catch {
-    const c = { programsRoot: defaultProgramsRoot(), githubToken: '' };
+    const c = {
+      programsRoot: defaultProgramsRoot(),
+      githubToken: '',
+      minimizeToTray: true,
+      startMinimized: false,
+      launchOnStartup: false,
+    };
     writeConfig(c);
     return c;
   }
@@ -409,10 +551,12 @@ function httpsGetJson(url, headers = {}, { allowCache = true } = {}) {
   });
 }
 
-function downloadToFile(url, dest) {
+function downloadToFile(url, dest, onProgress) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
     let finished = false;
+    let received = 0;
+    let total = 0;
     const fail = (err) => {
       if (finished) return;
       finished = true;
@@ -432,6 +576,12 @@ function downloadToFile(url, dest) {
           res.resume();
           return fail(new Error(`download ${res.statusCode} for ${u}`));
         }
+        total = parseInt(res.headers['content-length'] || '0', 10);
+        if (onProgress) onProgress({ received: 0, total });
+        res.on('data', (chunk) => {
+          received += chunk.length;
+          if (onProgress) onProgress({ received, total });
+        });
         res.pipe(file);
         file.on('finish', () => {
           if (finished) return;
@@ -476,11 +626,17 @@ async function resolveRelease(slug, { tag, usePin = true } = {}) {
   return fetchLatestRelease(slug);
 }
 
+function sendProgress(slug, payload) {
+  try { mainWindow?.webContents.send('cove:install:progress', { slug, ...payload }); } catch {}
+}
+
 async function installOrUpdate(slug, { force = false, tag: explicitTag } = {}) {
+  sendProgress(slug, { phase: 'resolving' });
   const release = await resolveRelease(slug, { tag: explicitTag });
   const tag = release?.tag_name || '';
   const asset = pickAsset(release?.assets);
   if (!asset) {
+    sendProgress(slug, { phase: 'error' });
     const plat = process.platform === 'darwin' ? 'macOS' : process.platform;
     throw new Error(`No ${plat} build available in release ${tag || '(unknown)'}.`);
   }
@@ -491,12 +647,48 @@ async function installOrUpdate(slug, { force = false, tag: explicitTag } = {}) {
   const finalPath = path.join(root, asset.name);
 
   if (!force && current?.tag === tag && current.path && exists(current.path)) {
+    sendProgress(slug, { phase: 'done' });
     return { ok: true, already: true, tag };
   }
 
   const tmp = path.join(root, `.${asset.name}.part`);
-  await downloadToFile(asset.browser_download_url, tmp);
+  sendProgress(slug, { phase: 'download', received: 0, total: asset.size || 0 });
+  try {
+    await downloadToFile(asset.browser_download_url, tmp, (p) => {
+      sendProgress(slug, { phase: 'download', received: p.received, total: p.total || asset.size || 0 });
+    });
+  } catch (err) {
+    sendProgress(slug, { phase: 'error' });
+    throw err;
+  }
 
+  // Optional checksum verification — looks for an asset named "<asset>.sha256"
+  // alongside the binary. Absent → skip silently; mismatch → abort.
+  const shaAsset = (release.assets || []).find(a => a?.name === `${asset.name}.sha256`);
+  if (shaAsset) {
+    sendProgress(slug, { phase: 'verify' });
+    try {
+      const shaTmp = path.join(root, `.${asset.name}.sha256.part`);
+      await downloadToFile(shaAsset.browser_download_url, shaTmp);
+      const shaText = fs.readFileSync(shaTmp, 'utf8').trim();
+      fs.unlinkSync(shaTmp);
+      // Accept "<hex>" or "<hex>  filename" (sha256sum format).
+      const expected = (shaText.split(/\s+/)[0] || '').toLowerCase();
+      const actual = await sha256File(tmp);
+      if (!/^[a-f0-9]{64}$/.test(expected) || expected !== actual) {
+        await fsp.rm(tmp, { force: true }).catch(() => {});
+        sendProgress(slug, { phase: 'error' });
+        throw new Error(`checksum mismatch for ${asset.name} (expected ${expected.slice(0, 12)}…, got ${actual.slice(0, 12)}…)`);
+      }
+    } catch (err) {
+      if (/checksum mismatch/i.test(err.message || '')) throw err;
+      // Download or parse error on the .sha256 file itself — don't block
+      // the install, just log. The binary itself succeeded.
+      console.warn('[cove-sha256]', err?.message || err);
+    }
+  }
+
+  sendProgress(slug, { phase: 'install' });
   // Only delete the prior file if we put it there. Adopted files belong
   // to the user; we leave them alone and just point the registry at the
   // new download.
@@ -517,7 +709,19 @@ async function installOrUpdate(slug, { force = false, tag: explicitTag } = {}) {
     source: 'managed',
     ...(current?.pinnedTag ? { pinnedTag: current.pinnedTag } : {}),
   });
+  sendProgress(slug, { phase: 'done' });
   return { ok: true, tag };
+}
+
+function sha256File(filePath) {
+  const crypto = require('node:crypto');
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (d) => hash.update(d));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
 }
 
 function planFromPath(absPath) {
@@ -531,9 +735,17 @@ function planFromPath(absPath) {
 
 async function scanOneInstalled(slug, info) {
   let latestTag = '';
+  let notesBody = '';
+  let notesUrl = '';
   try {
     const rel = await fetchLatestRelease(slug);
     latestTag = rel?.tag_name || '';
+    notesUrl = rel?.html_url || '';
+    // Keep the card-preview small — we trim to first 400 chars here, and the
+    // renderer clamps visually to 2 lines. Strip HTML-comment boilerplate
+    // that electron-builder-generated notes sometimes contain.
+    const raw = typeof rel?.body === 'string' ? rel.body : '';
+    notesBody = raw.replace(/<!--[\s\S]*?-->/g, '').trim().slice(0, 400);
   } catch {}
   // Pinned installs suppress the update prompt even when a newer release
   // exists upstream. The user explicitly asked to stay on this version.
@@ -550,6 +762,9 @@ async function scanOneInstalled(slug, info) {
     latestTag,
     hasUpdate,
     pinnedTag: pinned,
+    // Always return the latest-release pointer when we have one, even with
+    // an empty body — the card still benefits from the tag + "more…" link.
+    releaseNotes: latestTag ? { tag: latestTag, body: notesBody, url: notesUrl } : null,
   };
 }
 
@@ -570,6 +785,25 @@ ipcMain.handle('cove:config:get', () => {
     // Don't leak the token to the renderer — only whether one is set.
     hasGithubToken: !!cfg.githubToken,
     rateLimitedUntil: rateLimitUntil,
+    minimizeToTray: !!cfg.minimizeToTray,
+    startMinimized: !!cfg.startMinimized,
+    launchOnStartup: !!cfg.launchOnStartup,
+    platform: process.platform,
+  };
+});
+
+ipcMain.handle('cove:config:setPreferences', (_e, prefs = {}) => {
+  const cfg = readConfig();
+  if (typeof prefs.minimizeToTray === 'boolean')  cfg.minimizeToTray  = prefs.minimizeToTray;
+  if (typeof prefs.startMinimized === 'boolean')  cfg.startMinimized  = prefs.startMinimized;
+  if (typeof prefs.launchOnStartup === 'boolean') cfg.launchOnStartup = prefs.launchOnStartup;
+  writeConfig(cfg);
+  applyLoginItem(cfg);
+  return {
+    ok: true,
+    minimizeToTray: cfg.minimizeToTray,
+    startMinimized: cfg.startMinimized,
+    launchOnStartup: cfg.launchOnStartup,
   };
 });
 
@@ -759,6 +993,30 @@ ipcMain.handle('cove:confirmUpdateAll', async (_e, names = []) => {
   return { ok: response === 1 };
 });
 
+// Batch-fetch /releases/latest for any list of slugs — used by the renderer
+// to populate the card release-notes block on *all* programs (installed or
+// not). Backed by the same 5-min cache as the installed-scan path, so this
+// doesn't meaningfully increase API volume.
+ipcMain.handle('cove:latestReleases', async (_e, slugs = []) => {
+  if (!Array.isArray(slugs)) return { ok: false, error: 'slugs must be array' };
+  const releases = {};
+  await Promise.all(slugs.map(async (slug) => {
+    if (!/^[a-z0-9][a-z0-9-]*$/i.test(slug)) return;
+    try {
+      const rel = await fetchLatestRelease(slug);
+      const tag = rel?.tag_name || '';
+      if (!tag) return;
+      const body = (typeof rel?.body === 'string' ? rel.body : '')
+        .replace(/<!--[\s\S]*?-->/g, '').trim().slice(0, 400);
+      releases[slug] = { tag, body, url: rel?.html_url || '' };
+    } catch {
+      // Private / missing / rate-limited — silently skip; the card just
+      // won't show a release-notes block.
+    }
+  }));
+  return { ok: true, releases, rateLimitedUntil: rateLimitUntil };
+});
+
 ipcMain.handle('cove:releases', async (_e, slug) => {
   if (!/^[a-z0-9][a-z0-9-]*$/i.test(slug)) return { ok: false, error: 'invalid slug' };
   try {
@@ -873,8 +1131,14 @@ ipcMain.handle('cove:discover', async (_e, opts = {}) => {
   if (opts.force) apiCache.delete(url);
   try {
     const repos = await httpsGetJson(url);
+    // Bot repos (e.g. cove-*-bot) aren't user-installable tools, so we hide
+    // them from discovery. Anything with "bot" in the name is excluded.
     const mapped = (repos || [])
-      .filter(r => typeof r?.name === 'string' && /^cove-/i.test(r.name) && r.name !== GITHUB_REPO && !r.archived && !r.disabled)
+      .filter(r => typeof r?.name === 'string'
+        && /^cove-/i.test(r.name)
+        && !/bot/i.test(r.name)
+        && r.name !== GITHUB_REPO
+        && !r.archived && !r.disabled)
       .map(r => ({
         slug: r.name,
         name: prettyName(r.name),

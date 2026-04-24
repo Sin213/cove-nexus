@@ -2,7 +2,7 @@
 
 **Install, launch, and update every Cove tool from a single window.**
 
-![Cove Nexus](docs/screenshot.png)
+![Cove Nexus](renderer/assets/cove-video-editor-preview.png)
 
 Cove Nexus is a desktop launcher for the [Sin213](https://github.com/Sin213) fleet of Cove tools (upscaler, compressor, PDF kit, meme maker, video editor, and more). Browse the whole collection, install any tool with one click, launch it, and keep it up to date — all from one place.
 
@@ -40,11 +40,16 @@ Two options from the [Releases](https://github.com/Sin213/cove-nexus/releases/la
 ## Features
 
 - **One-window launcher** for every Cove tool — no hunting for AppImages or `.exe`s.
-- **Auto-discovery from GitHub** — any `cove-*` repo on the account shows up automatically.
-- **Install / launch / update** — each tool is a single click. Installs download the platform's release binary (Portable.exe on Windows, AppImage on Linux) from GitHub Releases.
+- **Auto-discovery from GitHub** — any `cove-*` repo on the account shows up automatically (`cove-*-bot` repos are filtered out).
+- **Install / launch / update** — each tool is a single click, with a live progress bar showing download bytes and verification status.
+- **Per-tool release notes** — the latest version and a short changelog preview sit on every card, fetched live from GitHub.
+- **Optional SHA-256 verification** — when a release ships a `<asset>.sha256` companion, Cove Nexus downloads and verifies before replacing the old binary. Missing → skipped.
+- **Tray icon + minimize-to-tray** — close the window and Nexus keeps running in the tray with a "Check for updates" option. Start-minimized and launch-on-startup are one-click toggles in Settings.
 - **Bring-your-own folder** — point Cove Nexus at a folder you already use (e.g., `~/Applications/`), and it auto-detects any Cove AppImage or `.exe` already living there.
 - **Adopted vs. managed** — files Cove Nexus downloads are "managed" (replaced on update). Files it merely adopted from your folder are "adopted" (left alone on update; you clean up old versions on your own schedule).
-- **Silent self-updates** — the launcher itself updates in the background from GitHub releases and relaunches seamlessly.
+- **Silent self-updates** — the launcher itself updates in the background from GitHub releases and relaunches seamlessly (Setup.exe + AppImage). Portable users get a one-click in-app banner.
+- **Pin + unpin versions** — choose a specific tag for any tool and stay on it until you unpin; updates won't override your choice.
+- **GitHub rate-limit aware** — transparent 5-minute cache, `X-RateLimit-*` backoff, optional PAT in Settings bumps the limit from 60/hr to 5000/hr.
 - **Themeable** — seven accent colors, three densities, two chrome modes (`Ctrl+,` for the Tweaks panel).
 - **Cross-platform** — Linux AppImage, Windows NSIS installer, Windows portable `.exe`.
 
@@ -71,6 +76,8 @@ Cove Nexus spawns the tracked binary directly. Failures to spawn (missing binary
 ### Silent self-update
 
 Cove Nexus uses [`electron-updater`](https://www.electron.build/auto-update) to check `github.com/Sin213/cove-nexus/releases/latest` on launch and hourly while running. When a newer release is found it downloads in the background and relaunches silently when ready. No prompt.
+
+The Windows **Portable** build is the one exception — `electron-updater` can't hot-swap a running `.exe` that the user dropped somewhere themselves, so portable users get a dismissable in-app banner instead. Setup.exe and AppImage continue to update silently.
 
 ---
 
