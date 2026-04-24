@@ -251,9 +251,12 @@
     const date = document.getElementById('ft-date');
     const shot = document.getElementById('ft-screenshot');
     const primaryLabel = document.getElementById('ft-primary-label');
-    if (title) title.textContent = prog.version ? `${prog.name} ${prog.version}` : prog.name;
+    // Prefer the upstream tag — the featured card showcases what's shipping
+    // right now, not whatever the user has installed locally.
+    const displayVer = (prog.latestTag || '').replace(/^v/, '') || prog.version || '';
+    if (title) title.textContent = displayVer ? `${prog.name} ${displayVer}` : prog.name;
     if (desc) desc.textContent = prog.desc || '';
-    if (version) version.textContent = prog.version ? `v${prog.version}` : '';
+    if (version) version.textContent = displayVer ? `v${displayVer}` : '';
     if (date) date.textContent = prog.updated || '';
     if (shot) {
       if (prog.preview) { shot.src = prog.preview; shot.style.display = ''; }
