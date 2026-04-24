@@ -2,7 +2,7 @@
 
 **Install, launch, and update every Cove tool from a single window.**
 
-![Cove Nexus](renderer/assets/cove-video-editor-preview.png)
+![Cove Nexus](docs/screenshot.png)
 
 Cove Nexus is a desktop launcher for the [Sin213](https://github.com/Sin213) fleet of Cove tools (upscaler, compressor, PDF kit, meme maker, video editor, and more). Browse the whole collection, install any tool with one click, launch it, and keep it up to date — all from one place.
 
