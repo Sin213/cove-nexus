@@ -1025,12 +1025,22 @@
   }
 
   async function init() {
+    // Paint first, fetch second. A quick registry read (no network) gives
+    // us enough to show correct Install/Launch states on the cards and
+    // static featured info, so the window looks populated within a frame
+    // instead of after the ~500ms GitHub scan.
     if (IS_DESKTOP) {
       try {
-        const info = await coveAPI.appInfo();
+        const [info, quickState] = await Promise.all([
+          coveAPI.appInfo(),
+          coveAPI.getState(),
+        ]);
         if (info?.version) state.appVersion = info.version;
+        if (quickState?.installed) state.onDisk = new Set(quickState.installed);
       } catch {}
     }
+    render();
+    // Now the slow path: network-backed scan, discovery, and release-notes.
     await rescan();
     render();
     await discoverAndMerge();
