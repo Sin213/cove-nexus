@@ -1,6 +1,6 @@
 {
   "name": "cove-nexus",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "The Cove Nexus — install, launch, and update every Cove tool from a single window.",
   "main": "main.js",
   "author": {
@@ -45,11 +45,17 @@
     ],
     "linux": {
       "target": [
-        "AppImage"
+        "AppImage",
+        "deb"
       ],
       "category": "Utility",
-      "icon": "build/icon.png",
-      "artifactName": "Cove-Nexus-${version}-${arch}.AppImage"
+      "icon": "build/icon.png"
+    },
+    "appImage": {
+      "artifactName": "Cove-Nexus-${version}-x86_64.AppImage"
+    },
+    "deb": {
+      "artifactName": "Cove-Nexus-${version}-amd64.deb"
     },
     "win": {
       "target": [

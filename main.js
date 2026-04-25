@@ -34,6 +34,25 @@ let tray = null;
 // distinguish "user really wants out" from "user clicked ×".
 app.isQuitting = false;
 
+// Single-instance lock. If the user double-clicks the .exe again while
+// Nexus is already running (including hidden in the tray), the second
+// process exits immediately and the first surfaces its window — no
+// duplicate windows or duplicate trays. Must run before app.whenReady().
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      if (!mainWindow.isVisible()) mainWindow.show();
+      mainWindow.focus();
+    } else {
+      createWindow();
+    }
+  });
+}
+
 function defaultProgramsRoot() {
   if (process.platform === 'win32') {
     const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
@@ -55,7 +74,10 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: '#0b0b10',
     show: false,
-    title: '',
+    // Sets the Windows taskbar label and the X11 window-class title; the
+    // page-title-updated listener below freezes it so the empty <title>
+    // in index.html can't blank it out after load.
+    title: 'Cove Nexus',
     frame: false,
     icon: path.join(__dirname, 'renderer', 'assets', 'cove_icon.png'),
     webPreferences: {
