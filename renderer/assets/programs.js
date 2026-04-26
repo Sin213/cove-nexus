@@ -4,14 +4,14 @@
 // tag (installs.json) to GitHub's /releases/latest tag.
 window.PROGRAMS = [
   {
-    name: "Cove Upscaler",
-    slug: "cove-upscaler",
-    desc: "AI-powered image and video upscaler. Boost resolution up to 4× using Real-ESRGAN models with batched processing and a built-in queue.",
+    name: "Cove Image Upscaler",
+    slug: "cove-image-upscaler",
+    desc: "Cross-platform desktop image upscaler for photos and anime. Electron + React + NCNN Vulkan — fully offline, no Python, no CUDA. Linux + Windows.",
     icon: "upscale",
     category: "cat-media",
     lang: "TypeScript",
-    version: "1.2.0",
-    updated: "Apr 22, 2026",
+    version: "2.0.0",
+    updated: "Apr 25, 2026",
     installed: false,
     hasUpdate: false,
   },

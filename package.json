@@ -1,6 +1,6 @@
 {
   "name": "cove-nexus",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "description": "The Cove Nexus — install, launch, and update every Cove tool from a single window.",
   "main": "main.js",
   "author": {
@@ -26,6 +26,7 @@
   "build": {
     "appId": "com.sin.cove-nexus",
     "productName": "Cove Nexus",
+    "afterAllArtifactBuild": "build/afterAllArtifactBuild.js",
     "directories": {
       "output": "release",
       "buildResources": "build"
