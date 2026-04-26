@@ -208,6 +208,7 @@ function applyLoginItem(cfg) {
 
 app.whenReady().then(() => {
   migrateLegacyInstalls();
+  migrateRenamedSlugs();
   ensureProgramsRoot();
   adoptFromProgramsRoot();
   const cfg = readConfig();
@@ -557,6 +558,28 @@ function migrateLegacyInstalls() {
     // pre-fix v1.0.0 git clone; isLegacyClone() below flags it for reinstall.
   }
 
+  if (changed) writeRegistry(reg);
+}
+
+// When a Sin213 repo is renamed (e.g. cove-upscaler → cove-image-upscaler),
+// GitHub 301-redirects the API but the local installs.json keeps the old
+// slug and the static program registry uses the new one — leaving the user
+// with an orphan registry entry that doesn't match any card. Walk a known
+// rename table and rekey on first boot. Idempotent.
+const RENAMED_SLUGS = {
+  'cove-upscaler': 'cove-image-upscaler',
+};
+function migrateRenamedSlugs() {
+  const reg = readRegistry();
+  let changed = false;
+  for (const [oldSlug, newSlug] of Object.entries(RENAMED_SLUGS)) {
+    if (!reg[oldSlug]) continue;
+    // If the new slug already has an entry the user reinstalled under the
+    // new name; drop the old one so we don't shadow the fresher install.
+    if (!reg[newSlug]) reg[newSlug] = reg[oldSlug];
+    delete reg[oldSlug];
+    changed = true;
+  }
   if (changed) writeRegistry(reg);
 }
 
