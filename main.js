@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage, safeStorage } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -38,11 +38,38 @@ app.isQuitting = false;
 // Nexus is already running (including hidden in the tray), the second
 // process exits immediately and the first surfaces its window — no
 // duplicate windows or duplicate trays. Must run before app.whenReady().
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
+//
+// We pass our version + on-disk path through additionalData so the running
+// instance can detect "user just double-clicked a *newer* portable" and
+// hand off to it instead of swallowing the click. Without this, a 2.0.x
+// instance hidden in the tray would silently consume a 2.0.(x+1) launch
+// and the user would never see the new version.
+function ownExePath() {
+  return process.env.PORTABLE_EXECUTABLE_FILE
+      || process.env.APPIMAGE
+      || process.execPath;
+}
+const gotSingleInstanceLock = app.requestSingleInstanceLock({
+  version: app.getVersion(),
+  exePath: ownExePath(),
+});
 if (!gotSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_e, _argv, _cwd, additionalData) => {
+    const newVer = additionalData?.version;
+    const newPath = additionalData?.exePath;
+    if (newVer && newPath && isNewerSemver(newVer, app.getVersion())) {
+      try {
+        app.relaunch({ execPath: newPath, args: [] });
+        app.isQuitting = true;
+        app.exit(0);
+        return;
+      } catch (err) {
+        console.error('[cove-handoff]', err?.message || err);
+        // fall through to surfacing the existing window
+      }
+    }
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       if (!mainWindow.isVisible()) mainWindow.show();
@@ -286,34 +313,86 @@ function exists(p) {
 
 // ---------- config (~/.config/cove-nexus/config.json) ----------
 
+// Token storage: prefer Electron's safeStorage (DPAPI on Windows, Keychain on
+// macOS, kwallet/gnome-keyring on Linux when available). When the platform
+// can't encrypt — typically a headless Linux box without a keyring — we fall
+// back to plaintext but lock the file down to 0600 so backups and other
+// users on the box can't trivially harvest it.
+function canEncryptTokens() {
+  try { return app.isReady() && safeStorage.isEncryptionAvailable(); }
+  catch { return false; }
+}
+
+function encodeToken(plain) {
+  if (!plain) return { githubTokenEnc: '', githubToken: '' };
+  if (canEncryptTokens()) {
+    try {
+      const enc = safeStorage.encryptString(plain);
+      return { githubTokenEnc: Buffer.from(enc).toString('base64'), githubToken: '' };
+    } catch (err) {
+      console.warn('[cove-token] encryption failed, falling back to plaintext:', err?.message || err);
+    }
+  }
+  return { githubTokenEnc: '', githubToken: plain };
+}
+
+function decodeToken(c) {
+  const enc = typeof c?.githubTokenEnc === 'string' ? c.githubTokenEnc : '';
+  if (enc && canEncryptTokens()) {
+    try { return safeStorage.decryptString(Buffer.from(enc, 'base64')); }
+    catch (err) {
+      console.warn('[cove-token] decryption failed:', err?.message || err);
+      return '';
+    }
+  }
+  return typeof c?.githubToken === 'string' ? c.githubToken : '';
+}
+
 function readConfig() {
-  try {
-    const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-    return {
-      programsRoot: typeof c?.programsRoot === 'string' && c.programsRoot
-        ? c.programsRoot
-        : defaultProgramsRoot(),
-      githubToken: typeof c?.githubToken === 'string' ? c.githubToken : '',
-      minimizeToTray: c?.minimizeToTray !== false,  // default on
-      startMinimized: !!c?.startMinimized,
-      launchOnStartup: !!c?.launchOnStartup,
-    };
-  } catch {
-    const c = {
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); }
+  catch {
+    raw = {
       programsRoot: defaultProgramsRoot(),
-      githubToken: '',
       minimizeToTray: true,
       startMinimized: false,
       launchOnStartup: false,
     };
-    writeConfig(c);
-    return c;
+    writeConfig({ ...raw, githubToken: '' });
+    return { ...raw, githubToken: '' };
   }
+  const token = decodeToken(raw);
+  // Migrate plaintext tokens forward as soon as we can encrypt. This is a
+  // one-shot rewrite — once `githubTokenEnc` is populated and `githubToken`
+  // is cleared on disk, the old field stays empty across future writes.
+  if (token && raw.githubToken && canEncryptTokens()) {
+    try { writeConfig({ ...raw, githubToken: token, programsRoot: raw.programsRoot || defaultProgramsRoot() }); }
+    catch (err) { console.warn('[cove-token] migration write failed:', err?.message || err); }
+  }
+  return {
+    programsRoot: typeof raw?.programsRoot === 'string' && raw.programsRoot
+      ? raw.programsRoot
+      : defaultProgramsRoot(),
+    githubToken: token,
+    minimizeToTray: raw?.minimizeToTray !== false,
+    startMinimized: !!raw?.startMinimized,
+    launchOnStartup: !!raw?.launchOnStartup,
+  };
 }
 
 function writeConfig(c) {
   fs.mkdirSync(USER_DATA, { recursive: true });
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(c, null, 2), 'utf8');
+  const { githubToken, ...rest } = c || {};
+  const tokenFields = encodeToken(githubToken || '');
+  const out = { ...rest, ...tokenFields };
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(out, null, 2), 'utf8');
+  // Lock the file down on POSIX even when encrypted — the rest of the
+  // config (programsRoot, prefs) doesn't need world-read either, and on
+  // Linux without a keyring we fall back to plaintext, so 0600 is load-
+  // bearing in that path.
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(CONFIG_FILE, 0o600); } catch {}
+  }
 }
 
 function ensureProgramsRoot() {
@@ -586,7 +665,11 @@ function httpsGetJson(url, headers = {}, { allowCache = true } = {}) {
   });
 }
 
-function downloadToFile(url, dest, onProgress) {
+// maxBytes (optional) caps how much we'll write to disk. Caller passes the
+// expected GitHub asset size plus a small tolerance; if the server hands us
+// more than that we abort. Without this an attacker who could swap a redirect
+// target for a bottomless stream would just fill the user's disk.
+function downloadToFile(url, dest, onProgress, { maxBytes = 0 } = {}) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
     let finished = false;
@@ -612,9 +695,17 @@ function downloadToFile(url, dest, onProgress) {
           return fail(new Error(`download ${res.statusCode} for ${u}`));
         }
         total = parseInt(res.headers['content-length'] || '0', 10);
+        if (maxBytes && total && total > maxBytes) {
+          res.resume();
+          return fail(new Error(`download too large: ${total} > ${maxBytes}`));
+        }
         if (onProgress) onProgress({ received: 0, total });
         res.on('data', (chunk) => {
           received += chunk.length;
+          if (maxBytes && received > maxBytes) {
+            req.destroy();
+            return fail(new Error(`download exceeded ${maxBytes} bytes`));
+          }
           if (onProgress) onProgress({ received, total });
         });
         res.pipe(file);
@@ -688,10 +779,14 @@ async function installOrUpdate(slug, { force = false, tag: explicitTag } = {}) {
 
   const tmp = path.join(root, `.${asset.name}.part`);
   sendProgress(slug, { phase: 'download', received: 0, total: asset.size || 0 });
+  // Hard cap: the GitHub-reported asset size plus 1 MiB of slack, falling back
+  // to a 1 GiB ceiling if the API didn't give us a size. Releases beyond that
+  // either aren't real or aren't ours.
+  const maxBytes = asset.size ? asset.size + 1024 * 1024 : 1024 * 1024 * 1024;
   try {
     await downloadToFile(asset.browser_download_url, tmp, (p) => {
       sendProgress(slug, { phase: 'download', received: p.received, total: p.total || asset.size || 0 });
-    });
+    }, { maxBytes });
   } catch (err) {
     sendProgress(slug, { phase: 'error' });
     throw err;
@@ -704,7 +799,8 @@ async function installOrUpdate(slug, { force = false, tag: explicitTag } = {}) {
     sendProgress(slug, { phase: 'verify' });
     try {
       const shaTmp = path.join(root, `.${asset.name}.sha256.part`);
-      await downloadToFile(shaAsset.browser_download_url, shaTmp);
+      // .sha256 sidecars are tiny — anything over 1 KiB is suspect.
+      await downloadToFile(shaAsset.browser_download_url, shaTmp, null, { maxBytes: 1024 });
       const shaText = fs.readFileSync(shaTmp, 'utf8').trim();
       fs.unlinkSync(shaTmp);
       // Accept "<hex>" or "<hex>  filename" (sha256sum format).
@@ -801,6 +897,15 @@ async function scanOneInstalled(slug, info) {
     // an empty body — the card still benefits from the tag + "more…" link.
     releaseNotes: latestTag ? { tag: latestTag, body: notesBody, url: notesUrl } : null,
   };
+}
+
+// Whitelist for any slug that flows from the renderer into a path
+// component, registry lookup, deletion target, or process spawn. Defends
+// the main process against a compromised or malformed renderer crafting
+// values like "../../../etc/passwd". Mirror the GitHub repo-name rules.
+const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/i;
+function isValidSlug(s) {
+  return typeof s === 'string' && s.length > 0 && s.length <= 64 && SLUG_RE.test(s);
 }
 
 // ---------- IPC: app + config ----------
@@ -938,7 +1043,7 @@ ipcMain.handle('cove:scan', async (_e, opts = {}) => {
 });
 
 ipcMain.handle('cove:install', async (_e, slug) => {
-  if (!/^[a-z0-9][a-z0-9-]*$/i.test(slug)) return { ok: false, error: 'invalid slug' };
+  if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
   // If a legacy git clone is blocking the slug, clear it — the new binary
   // will land in the programs root, not in ~/.cove-suite.
   const legacyDir = path.join(LEGACY_PROGRAMS, slug);
@@ -950,6 +1055,7 @@ ipcMain.handle('cove:install', async (_e, slug) => {
 });
 
 ipcMain.handle('cove:update', async (_e, slug) => {
+  if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
   const reg = readRegistry();
   const legacyDir = path.join(LEGACY_PROGRAMS, slug);
   if (!reg[slug] && !exists(legacyDir)) return { ok: false, error: 'not installed' };
@@ -961,6 +1067,7 @@ ipcMain.handle('cove:update', async (_e, slug) => {
 });
 
 ipcMain.handle('cove:launch', async (_e, slug) => {
+  if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
   if (isLegacyClone(slug)) {
     return { ok: false, error: 'This install is from an older version. Click Update to reinstall as a binary.' };
   }
@@ -998,6 +1105,7 @@ ipcMain.handle('cove:launch', async (_e, slug) => {
 });
 
 ipcMain.handle('cove:revealInstall', async (_e, slug) => {
+  if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
   const info = readRegistry()[slug];
   if (info?.path && exists(info.path)) {
     shell.showItemInFolder(info.path);
@@ -1036,7 +1144,7 @@ ipcMain.handle('cove:latestReleases', async (_e, slugs = []) => {
   if (!Array.isArray(slugs)) return { ok: false, error: 'slugs must be array' };
   const releases = {};
   await Promise.all(slugs.map(async (slug) => {
-    if (!/^[a-z0-9][a-z0-9-]*$/i.test(slug)) return;
+    if (!isValidSlug(slug)) return;
     try {
       const rel = await fetchLatestRelease(slug);
       const tag = rel?.tag_name || '';
@@ -1053,7 +1161,7 @@ ipcMain.handle('cove:latestReleases', async (_e, slugs = []) => {
 });
 
 ipcMain.handle('cove:releases', async (_e, slug) => {
-  if (!/^[a-z0-9][a-z0-9-]*$/i.test(slug)) return { ok: false, error: 'invalid slug' };
+  if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
   try {
     const releases = await fetchReleases(slug);
     const rows = (releases || [])
@@ -1072,7 +1180,7 @@ ipcMain.handle('cove:releases', async (_e, slug) => {
 });
 
 ipcMain.handle('cove:pin', async (_e, slug, tag) => {
-  if (!/^[a-z0-9][a-z0-9-]*$/i.test(slug)) return { ok: false, error: 'invalid slug' };
+  if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
   if (!tag || typeof tag !== 'string') return { ok: false, error: 'no tag' };
   // Install the pinned tag first, then record the pin. If the download
   // fails we don't want a pin pointing at a version that was never
@@ -1087,6 +1195,7 @@ ipcMain.handle('cove:pin', async (_e, slug, tag) => {
 });
 
 ipcMain.handle('cove:unpin', async (_e, slug) => {
+  if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
   const reg = readRegistry();
   if (!reg[slug]) return { ok: false, error: 'not installed' };
   delete reg[slug].pinnedTag;
@@ -1095,7 +1204,7 @@ ipcMain.handle('cove:unpin', async (_e, slug) => {
 });
 
 ipcMain.handle('cove:setCustomPath', async (_e, slug) => {
-  if (!/^[a-z0-9][a-z0-9-]*$/i.test(slug)) return { ok: false, error: 'invalid slug' };
+  if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
   const filters = process.platform === 'win32'
     ? [{ name: 'Executable', extensions: ['exe'] }]
     : [{ name: 'AppImage', extensions: ['AppImage', 'appimage'] }, { name: 'All files', extensions: ['*'] }];
@@ -1121,6 +1230,7 @@ ipcMain.handle('cove:setCustomPath', async (_e, slug) => {
 });
 
 ipcMain.handle('cove:uninstall', async (_e, slug) => {
+  if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
   const info = readRegistry()[slug];
   const legacyDir = path.join(LEGACY_PROGRAMS, slug);
   if (!info && !exists(legacyDir)) return { ok: true, already: true };

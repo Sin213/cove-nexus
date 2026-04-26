@@ -157,17 +157,17 @@
       : '';
 
     return `
-      <article class="card ${update ? 'pending' : ''}" data-slug="${p.slug}">
+      <article class="card ${update ? 'pending' : ''}" data-slug="${escapeAttr(p.slug)}">
         <div class="card-top">
           <div class="app-icon">${iconFor(p.icon)}</div>
           <div class="card-title-row">
             <div class="row1">
-              <h4>${p.name}</h4>
+              <h4>${escapeAttr(p.name)}</h4>
             </div>
           </div>
         </div>
 
-        <div class="card-desc" title="${escapeAttr(description)}">${description}</div>
+        <div class="card-desc" title="${escapeAttr(description)}">${escapeAttr(description)}</div>
 
         ${progressHtml(p)}
         ${releaseNotesHtml(p)}
@@ -429,7 +429,7 @@
       }
     }
     menu.innerHTML = items.map((it, i) =>
-      `<button data-i="${i}" style="all:unset;cursor:pointer;display:block;width:100%;padding:8px 12px;font-size:12.5px;color:${it.danger ? '#ff6b6b' : 'var(--text)'};border-radius:6px;">${it.label}</button>`
+      `<button data-i="${i}" style="all:unset;cursor:pointer;display:block;width:100%;padding:8px 12px;font-size:12.5px;color:${it.danger ? '#ff6b6b' : 'var(--text)'};border-radius:6px;">${escapeAttr(it.label)}</button>`
     ).join('');
     menu.style.cssText = 'position:fixed;z-index:70;background:#0f0f17;border:1px solid var(--border-strong);border-radius:10px;padding:4px;min-width:200px;box-shadow:0 20px 40px -16px rgba(0,0,0,0.8);';
     document.body.appendChild(menu);
@@ -927,15 +927,18 @@
       if (!rows.length) { pinList.innerHTML = '<div class="empty">No releases with compatible assets for this platform.</div>'; return; }
       const currentTag = res.current || '';
       const pinnedTag = res.pinned || '';
-      pinList.innerHTML = rows.map(r => {
+      // Tags come from GitHub. Index by row position so we never have to
+      // round-trip the raw tag string through an HTML attribute.
+      const tagByIndex = rows.map(r => r.tag);
+      pinList.innerHTML = rows.map((r, i) => {
         const chips = [];
         if (r.tag === currentTag) chips.push('<span class="tag-chip current">installed</span>');
         if (r.tag === pinnedTag)  chips.push('<span class="tag-chip current">pinned</span>');
         if (r.prerelease)         chips.push('<span class="tag-chip">pre-release</span>');
         const date = r.publishedAt ? new Date(r.publishedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: '2-digit' }) : '';
-        return `<div class="tag-row" data-tag="${r.tag}">
-          <div class="tag-name">${r.tag}</div>
-          <div class="tag-meta">${date}</div>
+        return `<div class="tag-row" data-i="${i}">
+          <div class="tag-name">${escapeAttr(r.tag)}</div>
+          <div class="tag-meta">${escapeAttr(date)}</div>
           ${chips.join('')}
         </div>`;
       }).join('');
@@ -943,12 +946,13 @@
         row.addEventListener('click', () => {
           pinList.querySelectorAll('.tag-row').forEach(r => r.classList.remove('selected'));
           row.classList.add('selected');
-          pinSelectedTag = row.dataset.tag;
-          pinConfirm.disabled = false;
+          const idx = parseInt(row.dataset.i, 10);
+          pinSelectedTag = Number.isInteger(idx) ? tagByIndex[idx] : null;
+          pinConfirm.disabled = !pinSelectedTag;
         });
       });
     } catch (e) {
-      pinList.innerHTML = `<div class="empty">Couldn't load releases: ${e.message}</div>`;
+      pinList.innerHTML = `<div class="empty">Couldn't load releases: ${escapeAttr(e.message)}</div>`;
     }
   }
 
