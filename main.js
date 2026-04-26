@@ -89,6 +89,19 @@ function createWindow() {
   });
 
   win.setMenuBarVisibility(false);
+  // Route any window.open / target=_blank to the system browser. Without this,
+  // Electron pops a child BrowserWindow that renders GitHub broken (no session,
+  // partial CSS), which is what users see when they click "more…".
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => {});
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (e, url) => {
+    if (/^https?:\/\//i.test(url)) {
+      e.preventDefault();
+      shell.openExternal(url).catch(() => {});
+    }
+  });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // Hold the window hidden until the renderer has painted, so users don't
   // see a black flash while the page loads. If startMinimized is on we
