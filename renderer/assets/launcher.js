@@ -776,9 +776,11 @@
       const prefSM    = document.getElementById('pref-start-minimized');
       const prefLOS   = document.getElementById('pref-launch-on-startup');
       const prefNote  = document.getElementById('pref-launch-note');
+      const prefCAL  = document.getElementById('pref-close-after-launch');
       if (prefMTT)  prefMTT.checked  = !!cfg.minimizeToTray;
       if (prefSM)   prefSM.checked   = !!cfg.startMinimized;
       if (prefLOS)  prefLOS.checked  = !!cfg.launchOnStartup;
+      if (prefCAL)  prefCAL.checked  = !!cfg.closeAfterLaunch;
       // Linux has no native login-item — grey the checkbox and explain.
       if (prefLOS && cfg.platform === 'linux') {
         prefLOS.disabled = true;
@@ -796,6 +798,7 @@
   document.getElementById('pref-minimize-to-tray')?.addEventListener('change', (e) => savePrefs({ minimizeToTray: e.target.checked }));
   document.getElementById('pref-start-minimized')?.addEventListener('change',  (e) => savePrefs({ startMinimized: e.target.checked }));
   document.getElementById('pref-launch-on-startup')?.addEventListener('change', (e) => savePrefs({ launchOnStartup: e.target.checked }));
+  document.getElementById('pref-close-after-launch')?.addEventListener('change', (e) => savePrefs({ closeAfterLaunch: e.target.checked }));
 
   // Tray → "Check for updates"
   if (IS_DESKTOP && coveAPI.onTrayCheckUpdates) {

@@ -378,6 +378,7 @@ function readConfig() {
     minimizeToTray: raw?.minimizeToTray !== false,
     startMinimized: !!raw?.startMinimized,
     launchOnStartup: !!raw?.launchOnStartup,
+    closeAfterLaunch: !!raw?.closeAfterLaunch,
   };
 }
 
@@ -951,6 +952,7 @@ ipcMain.handle('cove:config:get', () => {
     minimizeToTray: !!cfg.minimizeToTray,
     startMinimized: !!cfg.startMinimized,
     launchOnStartup: !!cfg.launchOnStartup,
+    closeAfterLaunch: !!cfg.closeAfterLaunch,
     platform: process.platform,
   };
 });
@@ -960,6 +962,7 @@ ipcMain.handle('cove:config:setPreferences', (_e, prefs = {}) => {
   if (typeof prefs.minimizeToTray === 'boolean')  cfg.minimizeToTray  = prefs.minimizeToTray;
   if (typeof prefs.startMinimized === 'boolean')  cfg.startMinimized  = prefs.startMinimized;
   if (typeof prefs.launchOnStartup === 'boolean') cfg.launchOnStartup = prefs.launchOnStartup;
+  if (typeof prefs.closeAfterLaunch === 'boolean') cfg.closeAfterLaunch = prefs.closeAfterLaunch;
   writeConfig(cfg);
   applyLoginItem(cfg);
   return {
@@ -967,6 +970,7 @@ ipcMain.handle('cove:config:setPreferences', (_e, prefs = {}) => {
     minimizeToTray: cfg.minimizeToTray,
     startMinimized: cfg.startMinimized,
     launchOnStartup: cfg.launchOnStartup,
+    closeAfterLaunch: cfg.closeAfterLaunch,
   };
 });
 
@@ -1119,6 +1123,7 @@ ipcMain.handle('cove:launch', async (_e, slug) => {
       setTimeout(() => {
         if (settled) return;
         settled = true;
+        if (readConfig().closeAfterLaunch && mainWindow) mainWindow.hide();
         resolve({ ok: true, kind: plan.kind });
       }, 600);
     });
