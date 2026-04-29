@@ -108,10 +108,12 @@ git clone https://github.com/Sin213/cove-nexus.git
 cd cove-nexus
 npm install
 npm start                # dev run
-npm run dist:linux       # build AppImage → release/
-npm run dist:win         # build Windows NSIS + portable → release/ (needs Wine on Linux)
-npm run release          # build + publish to GitHub (needs GH_TOKEN env var)
+npm run dist:linux       # build AppImage + .deb → release/
+npm run dist:win         # build Windows NSIS Setup.exe + Portable.exe → release/ (needs Wine on Linux)
+npm run release          # build Linux + Windows, publish to GitHub, upload sha256 sidecars (needs GH_TOKEN)
 ```
+
+Every shipped binary (AppImage, .deb, Setup.exe, Portable.exe) gets a matching `<asset>.sha256` sidecar in `release/`, written by `build/afterAllArtifactBuild.js`. The `release` script additionally runs `build/postReleaseSidecars.js` to generate and upload sidecars for the auto-update metadata files (`latest*.yml`).
 
 ### Project layout
 

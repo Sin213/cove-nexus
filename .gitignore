@@ -4,3 +4,12 @@ release/
 .DS_Store
 cove-tool-launcher/
 *.log
+
+# Local AI/audit scratch files
+.audit/
+codex-reviews/
+
+# Personal agent / workflow config
+CLAUDE.md
+WORKFLOW.md
+RELEASES.md

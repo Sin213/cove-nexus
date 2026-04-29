@@ -123,9 +123,13 @@ function createWindow() {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => {});
     return { action: 'deny' };
   });
+  // Fail-closed: cancel every main-frame navigation away from index.html, then
+  // forward only http(s) URLs to the system browser. Without the unconditional
+  // preventDefault, a coerced `location.href = 'javascript:…'` or `file:///…`
+  // would actually navigate the renderer.
   win.webContents.on('will-navigate', (e, url) => {
+    e.preventDefault();
     if (/^https?:\/\//i.test(url)) {
-      e.preventDefault();
       shell.openExternal(url).catch(() => {});
     }
   });
@@ -886,6 +890,44 @@ function planFromPath(absPath) {
   return { cmd: absPath, args: [], kind: 'exec' };
 }
 
+// Curated environment for child tools spawned by the launcher. We intentionally
+// do NOT pass `process.env`, because that inherits the user's shell secrets
+// (GITHUB_TOKEN, GH_TOKEN, ANTHROPIC_API_KEY, etc.) and Cove-Nexus-internal
+// vars to arbitrary third-party binaries. Allowlist covers what a GUI tool
+// needs to find binaries, render graphics, and pick a locale; everything else
+// stays in the parent.
+const LAUNCH_ENV_KEYS = new Set([
+  'PATH', 'PATHEXT', 'HOME', 'USER', 'LOGNAME', 'USERNAME',
+  'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PUBLIC', 'COMPUTERNAME',
+  'TEMP', 'TMP', 'TMPDIR',
+  'SYSTEMROOT', 'SYSTEMDRIVE', 'COMSPEC', 'WINDIR',
+  'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER',
+  'NUMBER_OF_PROCESSORS', 'OS',
+  'LANG', 'LANGUAGE', 'TZ',
+  'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY',
+  'DBUS_SESSION_BUS_ADDRESS',
+  'LD_LIBRARY_PATH',
+  'SHELL', 'TERM',
+]);
+const LAUNCH_ENV_PREFIXES = ['XDG_', 'LC_', 'GTK_', 'QT_', 'GDK_'];
+function buildLaunchEnv() {
+  // Windows env vars are case-insensitive at the OS level but Object.entries
+  // returns them with whatever casing the process was launched with — most
+  // commonly `Path`, `Temp`, `Tmp`, `WinDir`, `ComSpec`. Compare against the
+  // uppercase allowlist on win32 so the launched tool still has a search
+  // path; on other platforms env vars are case-sensitive and we keep the
+  // exact-match semantics.
+  const isWin = process.platform === 'win32';
+  const out = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    const cmp = isWin ? k.toUpperCase() : k;
+    if (LAUNCH_ENV_KEYS.has(cmp) || LAUNCH_ENV_PREFIXES.some(p => cmp.startsWith(p))) {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
 // ---------- scan ----------
 
 async function scanOneInstalled(slug, info) {
@@ -1108,7 +1150,7 @@ ipcMain.handle('cove:launch', async (_e, slug) => {
       cwd: path.dirname(info.path),
       detached: true,
       stdio: 'ignore',
-      env: process.env,
+      env: buildLaunchEnv(),
     });
     child.unref();
     // Let the OS surface ENOENT/EACCES synchronously before we report

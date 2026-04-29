@@ -1,6 +1,6 @@
 {
   "name": "cove-nexus",
-  "version": "2.0.5",
+  "version": "2.0.6",
   "description": "The Cove Nexus — install, launch, and update every Cove tool from a single window.",
   "main": "main.js",
   "author": {
@@ -14,7 +14,7 @@
     "dist": "electron-builder",
     "dist:linux": "electron-builder --linux",
     "dist:win": "electron-builder --win",
-    "release": "electron-builder --linux --win --publish=always"
+    "release": "electron-builder --linux --win --publish=always && node build/postReleaseSidecars.js"
   },
   "dependencies": {
     "electron-updater": "^6.3.9"

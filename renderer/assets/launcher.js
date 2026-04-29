@@ -319,6 +319,12 @@
 
   async function doLaunch(prog) {
     const slug = prog.slug;
+    // Synchronous in-flight guard. The button's `disabled` state only takes
+    // effect after the next render() — between the click and that paint, a
+    // rapid second click would otherwise enqueue a second IPC `launch`,
+    // which spawns a duplicate detached child process (worst with
+    // closeAfterLaunch on, where the window closes between the two spawns).
+    if (state.busy[slug]) return;
     state.busy[slug] = 'launching';
     render();
     try {
