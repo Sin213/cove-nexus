@@ -12,6 +12,7 @@
     'cat-docs': 'Documents',
     'cat-utils': 'Utilities',
     'cat-create': 'Create',
+    'cat-bookmarks': 'Bookmarks',
   };
 
   let state = {
@@ -27,6 +28,9 @@
     appVersion: '',
     rateLimitedUntil: 0,
     hasGithubToken: false,
+    toolOrder: [],
+    bookmarks: new Set(),
+    theme: 'dark',
   };
 
   function iconFor(name) {
@@ -45,13 +49,44 @@
     return !!p.hasUpdate;
   }
 
+  function isBookmarked(p) {
+    return state.bookmarks.has(p.slug);
+  }
+
+  // Drag-reorder is enabled in every view. The merge in reorderTo() always
+  // preserves hidden slugs' positions, so a drop in a filtered view rewrites
+  // only the visible slice's order in the global toolOrder.
+  function reorderEnabled() {
+    return true;
+  }
+
   function filtered() {
-    return window.PROGRAMS.filter(p => {
+    const list = window.PROGRAMS.filter(p => {
       if (state.filter === 'installed' && !isInstalled(p)) return false;
       if (state.filter === 'notinstalled' && isInstalled(p)) return false;
       if (state.filter === 'updates' && !hasUpdate(p)) return false;
+      if (state.filter === 'cat-bookmarks') return isBookmarked(p);
       if (state.filter.startsWith('cat-') && p.category !== state.filter) return false;
       return true;
+    });
+    return sortPrograms(list);
+  }
+
+  // Sort precedence:
+  //   1) bookmarked first (so a starred tool floats to the top in any view)
+  //   2) explicit toolOrder index from drag-reorder
+  //   3) fallback to original window.PROGRAMS index (registration order)
+  function sortPrograms(list) {
+    const origIdx = new Map(window.PROGRAMS.map((p, i) => [p.slug, i]));
+    const orderIdx = new Map(state.toolOrder.map((slug, i) => [slug, i]));
+    const bigOrder = state.toolOrder.length + window.PROGRAMS.length + 1;
+    return list.slice().sort((a, b) => {
+      const ba = isBookmarked(a) ? 0 : 1;
+      const bb = isBookmarked(b) ? 0 : 1;
+      if (ba !== bb) return ba - bb;
+      const oa = orderIdx.has(a.slug) ? orderIdx.get(a.slug) : bigOrder + (origIdx.get(a.slug) ?? 0);
+      const ob = orderIdx.has(b.slug) ? orderIdx.get(b.slug) : bigOrder + (origIdx.get(b.slug) ?? 0);
+      return oa - ob;
     });
   }
 
@@ -69,12 +104,14 @@
     return { label: 'Launch', action: 'launch' };
   }
 
-  // Returns { kind: 'ok'|'update'|'none', text: string } for the status pill.
+  // Returns { kind: 'ok'|'update'|'unknown'|'none', text: string } for the status pill.
   function statusFor(p) {
     const installed = isInstalled(p);
     if (!installed) return { kind: 'none', text: 'Not installed' };
     const version = p.version ? `v${p.version.replace(/^v/, '')}` : 'installed';
-    return { kind: hasUpdate(p) ? 'update' : 'ok', text: version };
+    if (hasUpdate(p)) return { kind: 'update', text: version };
+    if (p.latestUnknown) return { kind: 'unknown', text: `${version} · update unknown` };
+    return { kind: 'ok', text: version };
   }
 
   function escapeAttr(s) {
@@ -156,13 +193,19 @@
          </button>`
       : '';
 
+    const bookmarked = isBookmarked(p);
+    const starSvg = bookmarked
+      ? '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>'
+      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
+
     return `
-      <article class="card ${update ? 'pending' : ''}" data-slug="${escapeAttr(p.slug)}">
+      <article class="card ${update ? 'pending' : ''} ${bookmarked ? 'bookmarked' : ''}" data-slug="${escapeAttr(p.slug)}" draggable="${reorderEnabled() ? 'true' : 'false'}">
         <div class="card-top">
           <div class="app-icon">${iconFor(p.icon)}</div>
           <div class="card-title-row">
             <div class="row1">
               <h4>${escapeAttr(p.name)}</h4>
+              <button class="bookmark-btn ${bookmarked ? 'on' : ''}" data-action="bookmark" aria-label="${bookmarked ? 'Remove bookmark' : 'Bookmark'}" title="${bookmarked ? 'Remove bookmark' : 'Bookmark'}">${starSvg}</button>
             </div>
           </div>
         </div>
@@ -173,7 +216,7 @@
         ${releaseNotesHtml(p)}
 
         <div class="card-bottom">
-          <span class="status-pill ${status.kind}" title="${status.kind === 'update' ? 'Update available' : status.kind === 'ok' ? 'Up to date' : 'Not installed'}">
+          <span class="status-pill ${status.kind}" title="${status.kind === 'update' ? 'Update available' : status.kind === 'ok' ? 'Up to date' : status.kind === 'unknown' ? 'Latest version unknown — GitHub may be rate-limited or offline' : 'Not installed'}">
             <span class="dot"></span>${status.text}
           </span>
           <div style="display:flex;gap:6px;align-items:center;">
@@ -193,7 +236,11 @@
 
   function render() {
     const list = filtered();
-    grid.innerHTML = list.map(card).join('');
+    if (list.length === 0 && state.filter === 'cat-bookmarks') {
+      grid.innerHTML = '<div class="grid-empty">Star a tool to bookmark it.</div>';
+    } else {
+      grid.innerHTML = list.map(card).join('');
+    }
     gridCount.textContent = list.length;
 
     const filterLabels = {
@@ -211,6 +258,7 @@
     const installed = window.PROGRAMS.filter(isInstalled).length;
     const notinstalled = all - installed;
     const updatesCount = updates.length;
+    const bookmarksCount = window.PROGRAMS.filter(isBookmarked).length;
     document.querySelectorAll('#nav-library button').forEach(b => {
       const f = b.dataset.filter;
       const countEl = b.querySelector('.count');
@@ -219,6 +267,7 @@
       if (f === 'installed') countEl.textContent = installed;
       if (f === 'notinstalled') countEl.textContent = notinstalled;
       if (f === 'updates') countEl.textContent = updatesCount;
+      if (f === 'cat-bookmarks') countEl.textContent = bookmarksCount;
     });
 
     const brandMeta = document.getElementById('brand-meta');
@@ -284,7 +333,7 @@
     const el = document.createElement('div');
     el.textContent = msg;
     const border = kind === 'error' ? 'rgba(255,107,107,0.4)' : 'var(--border-strong)';
-    el.style.cssText = `pointer-events:auto;background:#0f0f17;color:var(--text);border:1px solid ${border};border-radius:10px;padding:10px 14px;font-size:12.5px;max-width:360px;box-shadow:0 20px 40px -20px rgba(0,0,0,0.8);opacity:0;transition:opacity 160ms, transform 160ms;transform:translateY(-4px);`;
+    el.style.cssText = `pointer-events:auto;background:var(--bg-deep);color:var(--text);border:1px solid ${border};border-radius:10px;padding:10px 14px;font-size:12.5px;max-width:360px;box-shadow:0 20px 40px -20px var(--shadow-strong);opacity:0;transition:opacity 160ms, transform 160ms;transform:translateY(-4px);`;
     host.appendChild(el);
     requestAnimationFrame(() => { el.style.opacity = '1'; el.style.transform = 'translateY(0)'; });
     setTimeout(() => {
@@ -398,7 +447,114 @@
     else if (action === 'launch') doLaunch(prog);
     else if (action === 'update') doUpdate(prog);
     else if (action === 'menu') openCardMenu(btn, prog);
+    else if (action === 'bookmark') toggleBookmark(prog);
   });
+
+  function toggleBookmark(prog) {
+    if (state.bookmarks.has(prog.slug)) state.bookmarks.delete(prog.slug);
+    else state.bookmarks.add(prog.slug);
+    persistBookmarks();
+    render();
+  }
+
+  // ——— Drag-to-reorder ———
+  // Native HTML5 DnD on .card[data-slug]. The visible-slice order is
+  // recomputed on drop, then merged into the global state.toolOrder so
+  // hidden tools (filtered out by category/etc.) keep their relative
+  // positions. Persisted via setPreferences after every drop.
+  let dragSlug = null;
+
+  grid.addEventListener('dragstart', (e) => {
+    if (!reorderEnabled()) return;
+    const cardEl = e.target.closest('.card[data-slug]');
+    if (!cardEl) return;
+    dragSlug = cardEl.dataset.slug;
+    cardEl.classList.add('dragging');
+    try {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', dragSlug);
+    } catch {}
+  });
+
+  grid.addEventListener('dragend', () => {
+    grid.querySelectorAll('.card.dragging').forEach(el => el.classList.remove('dragging'));
+    grid.querySelectorAll('.card.drop-before, .card.drop-after').forEach(el => {
+      el.classList.remove('drop-before', 'drop-after');
+    });
+    dragSlug = null;
+  });
+
+  grid.addEventListener('dragover', (e) => {
+    if (!dragSlug) return;
+    if (!reorderEnabled()) return;
+    const overCard = e.target.closest('.card[data-slug]');
+    if (!overCard) return;
+    if (overCard.dataset.slug === dragSlug) return;
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = 'move'; } catch {}
+    grid.querySelectorAll('.card.drop-before, .card.drop-after').forEach(el => {
+      el.classList.remove('drop-before', 'drop-after');
+    });
+    const r = overCard.getBoundingClientRect();
+    const before = (e.clientX - r.left) < r.width / 2;
+    overCard.classList.add(before ? 'drop-before' : 'drop-after');
+  });
+
+  grid.addEventListener('drop', (e) => {
+    if (!dragSlug) return;
+    if (!reorderEnabled()) return;
+    const overCard = e.target.closest('.card[data-slug]');
+    if (!overCard) return;
+    if (overCard.dataset.slug === dragSlug) return;
+    e.preventDefault();
+    const r = overCard.getBoundingClientRect();
+    const before = (e.clientX - r.left) < r.width / 2;
+    reorderTo(dragSlug, overCard.dataset.slug, before);
+  });
+
+  // Compute the new visible slug order, then merge into state.toolOrder so
+  // hidden cards keep their relative positions. We rebuild a complete global
+  // order array (every known slug) and persist that whole array.
+  function reorderTo(srcSlug, dstSlug, before) {
+    const visible = filtered().map(p => p.slug);
+    const srcIdx = visible.indexOf(srcSlug);
+    const dstIdx = visible.indexOf(dstSlug);
+    if (srcIdx < 0 || dstIdx < 0) return;
+    visible.splice(srcIdx, 1);
+    let insertIdx = visible.indexOf(dstSlug);
+    if (!before) insertIdx += 1;
+    visible.splice(insertIdx, 0, srcSlug);
+
+    // Build the new full order: walk the existing global order (or original
+    // registration order if toolOrder is empty), and at each visible-slug
+    // slot, take the next element from `visible`. Hidden slugs keep their
+    // positions; visible slugs land in the new visible-order sequence.
+    const visibleSet = new Set(filtered().map(p => p.slug));
+    const baseOrder = state.toolOrder.length
+      ? state.toolOrder.slice()
+      : window.PROGRAMS.map(p => p.slug);
+    // Make sure every program is represented at least once so a fresh
+    // install isn't dropped from the persisted order.
+    for (const p of window.PROGRAMS) {
+      if (!baseOrder.includes(p.slug)) baseOrder.push(p.slug);
+    }
+    const visibleQueue = visible.slice();
+    const next = [];
+    for (const slug of baseOrder) {
+      if (visibleSet.has(slug)) {
+        const v = visibleQueue.shift();
+        if (v) next.push(v);
+      } else {
+        next.push(slug);
+      }
+    }
+    // Drain anything left (defensive — shouldn't happen if sets line up).
+    for (const v of visibleQueue) if (!next.includes(v)) next.push(v);
+
+    state.toolOrder = next;
+    persistToolOrder();
+    render();
+  }
 
   function openCardMenu(anchor, prog) {
     document.getElementById('card-menu')?.remove();
@@ -437,7 +593,7 @@
     menu.innerHTML = items.map((it, i) =>
       `<button data-i="${i}" style="all:unset;cursor:pointer;display:block;width:100%;padding:8px 12px;font-size:12.5px;color:${it.danger ? '#ff6b6b' : 'var(--text)'};border-radius:6px;">${escapeAttr(it.label)}</button>`
     ).join('');
-    menu.style.cssText = 'position:fixed;z-index:70;background:#0f0f17;border:1px solid var(--border-strong);border-radius:10px;padding:4px;min-width:200px;box-shadow:0 20px 40px -16px rgba(0,0,0,0.8);';
+    menu.style.cssText = 'position:fixed;z-index:70;background:var(--bg-deep);border:1px solid var(--border-strong);border-radius:10px;padding:4px;min-width:200px;box-shadow:0 20px 40px -16px var(--shadow-strong);';
     document.body.appendChild(menu);
     const r = anchor.getBoundingClientRect();
     menu.style.top = `${Math.min(window.innerHeight - 220, r.bottom + 6)}px`;
@@ -501,6 +657,35 @@
   });
 
   const tweaksPanel = document.getElementById('tweaks');
+
+  // Theme is tracked separately from accent/density/chrome because it has to
+  // be applied before first paint (via the inline <head> script) to avoid a
+  // flash. This helper just keeps the documentElement class in sync with
+  // state.theme; the inline script does the same thing on load.
+  function applyTheme(theme) {
+    const isLight = theme === 'light';
+    document.documentElement.classList.toggle('light', isLight);
+    state.theme = isLight ? 'light' : 'dark';
+    const btn = document.getElementById('btn-theme');
+    if (btn) btn.setAttribute('aria-label', isLight ? 'Switch to dark theme' : 'Switch to light theme');
+  }
+
+  function persistBookmarks() {
+    if (!IS_DESKTOP) return;
+    const arr = Array.from(state.bookmarks).sort();
+    coveAPI.config.setPreferences({ bookmarks: arr }).catch(() => {});
+  }
+
+  function persistToolOrder() {
+    if (!IS_DESKTOP) return;
+    coveAPI.config.setPreferences({ toolOrder: state.toolOrder.slice() }).catch(() => {});
+  }
+
+  function persistTheme() {
+    if (!IS_DESKTOP) return;
+    coveAPI.config.setPreferences({ theme: state.theme }).catch(() => {});
+  }
+
   function applyTweaks(t) {
     if (t.accent) {
       document.documentElement.style.setProperty('--accent', t.accent);
@@ -526,11 +711,26 @@
   try { savedTweaks = JSON.parse(localStorage.getItem('cove-tweaks') || '{}'); } catch {}
   const initialTweaks = { ...(window.TWEAK_DEFAULTS || {}), ...savedTweaks };
   applyTweaks(initialTweaks);
+  // Theme on first paint comes from the inline <head> script which reads the
+  // same cove-tweaks blob; mirror it into state so the toggle is accurate
+  // before init() resolves the canonical value from config.json.
+  if (savedTweaks.theme === 'light' || savedTweaks.theme === 'dark') {
+    state.theme = savedTweaks.theme;
+  }
+  applyTheme(state.theme);
   let currentTweaks = { ...initialTweaks };
 
   function persistTweaks() {
     try { localStorage.setItem('cove-tweaks', JSON.stringify(currentTweaks)); } catch {}
   }
+
+  document.getElementById('btn-theme')?.addEventListener('click', () => {
+    const next = state.theme === 'light' ? 'dark' : 'light';
+    applyTheme(next);
+    currentTweaks.theme = next;
+    persistTweaks();
+    persistTheme();
+  });
 
   document.querySelectorAll('#swatches button').forEach(b => {
     b.addEventListener('click', () => {
@@ -712,6 +912,7 @@
         if (prog) {
           prog.pinnedTag = row.pinnedTag || '';
           prog.latestTag = row.latestTag || '';
+          prog.latestUnknown = !!row.latestUnknown;
           prog.source = row.source || '';
           if (row.version) prog.version = row.version.replace(/^v/, '');
         }
@@ -1044,12 +1245,23 @@
     // instead of after the ~500ms GitHub scan.
     if (IS_DESKTOP) {
       try {
-        const [info, quickState] = await Promise.all([
+        const [info, quickState, cfg] = await Promise.all([
           coveAPI.appInfo(),
           coveAPI.getState(),
+          coveAPI.config.get(),
         ]);
         if (info?.version) state.appVersion = info.version;
         if (quickState?.installed) state.onDisk = new Set(quickState.installed);
+        if (cfg) {
+          state.toolOrder = Array.isArray(cfg.toolOrder) ? cfg.toolOrder.slice() : [];
+          state.bookmarks = new Set(Array.isArray(cfg.bookmarks) ? cfg.bookmarks : []);
+          const cfgTheme = cfg.theme === 'light' ? 'light' : 'dark';
+          if (cfgTheme !== state.theme) {
+            applyTheme(cfgTheme);
+            currentTweaks.theme = cfgTheme;
+            persistTweaks();
+          }
+        }
       } catch {}
     }
     render();
