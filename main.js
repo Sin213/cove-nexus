@@ -374,6 +374,17 @@ function readConfig() {
     try { writeConfig({ ...raw, githubToken: token, programsRoot: raw.programsRoot || defaultProgramsRoot() }); }
     catch (err) { console.warn('[cove-token] migration write failed:', err?.message || err); }
   }
+  // Validated projection of renderer-driven UX prefs. These must round-trip
+  // through readConfig → setPreferences → writeConfig, otherwise saving one
+  // pref would silently erase the others from config.json on the next write.
+  const toolOrder = Array.isArray(raw?.toolOrder)
+    ? raw.toolOrder.filter(s => typeof s === 'string' && isValidSlug(s))
+    : [];
+  const seenBm = new Set();
+  const bookmarks = Array.isArray(raw?.bookmarks)
+    ? raw.bookmarks.filter(s => typeof s === 'string' && isValidSlug(s) && !seenBm.has(s) && seenBm.add(s)).sort()
+    : [];
+  const theme = raw?.theme === 'light' ? 'light' : 'dark';
   return {
     programsRoot: typeof raw?.programsRoot === 'string' && raw.programsRoot
       ? raw.programsRoot
@@ -383,6 +394,9 @@ function readConfig() {
     startMinimized: !!raw?.startMinimized,
     launchOnStartup: !!raw?.launchOnStartup,
     closeAfterLaunch: !!raw?.closeAfterLaunch,
+    toolOrder,
+    bookmarks,
+    theme,
   };
 }
 
@@ -944,24 +958,59 @@ async function scanOneInstalled(slug, info) {
     const raw = typeof rel?.body === 'string' ? rel.body : '';
     notesBody = raw.replace(/<!--[\s\S]*?-->/g, '').trim().slice(0, 400);
   } catch {}
+
+  // Persist the most recent successful latestTag so a transient rate-limit
+  // (empty latestTag this tick) doesn't silently hide a previously-detected
+  // update. Falls back to the cached value when this scan came up empty.
+  const cachedLatest = info.lastKnownLatestTag || '';
+  if (latestTag && latestTag !== cachedLatest) {
+    try {
+      const reg = readRegistry();
+      if (reg[slug]) {
+        reg[slug].lastKnownLatestTag = latestTag;
+        writeRegistry(reg);
+      }
+    } catch {}
+  }
+  const effectiveLatest = latestTag || cachedLatest;
+
   // Pinned installs suppress the update prompt even when a newer release
   // exists upstream. The user explicitly asked to stay on this version.
   const pinned = info.pinnedTag || '';
-  const hasUpdate = pinned
-    ? false
-    : !!(latestTag && info.tag && latestTag !== info.tag);
+  const localVer  = (info.tag       || '').replace(/^v/, '');
+  const remoteVer = (effectiveLatest || '').replace(/^v/, '');
+  const hasUpdate = !pinned && !!localVer && !!remoteVer && isNewerSemver(remoteVer, localVer);
+  // True only when GitHub gave us nothing AND we have no cached value to
+  // fall back on — the renderer can show a "?" pill instead of pretending
+  // the installed version is the latest.
+  const latestUnknown = !pinned && !!localVer && !effectiveLatest;
+
+  if (process.env.DEBUG_UPDATE_CHECK) {
+    console.log('[cove-update-check]', {
+      slug,
+      installedTag: info.tag,
+      latestTag,
+      cachedLatest,
+      effectiveLatest,
+      pinned,
+      hasUpdate,
+      latestUnknown,
+    });
+  }
+
   return {
     slug,
     manifest: null,
     installed: true,
     source: info.source || 'managed',
     version: info.tag || '',
-    latestTag,
+    latestTag: effectiveLatest,
     hasUpdate,
+    latestUnknown,
     pinnedTag: pinned,
     // Always return the latest-release pointer when we have one, even with
     // an empty body — the card still benefits from the tag + "more…" link.
-    releaseNotes: latestTag ? { tag: latestTag, body: notesBody, url: notesUrl } : null,
+    releaseNotes: effectiveLatest ? { tag: effectiveLatest, body: notesBody, url: notesUrl } : null,
   };
 }
 
@@ -995,6 +1044,9 @@ ipcMain.handle('cove:config:get', () => {
     startMinimized: !!cfg.startMinimized,
     launchOnStartup: !!cfg.launchOnStartup,
     closeAfterLaunch: !!cfg.closeAfterLaunch,
+    toolOrder: Array.isArray(cfg.toolOrder) ? cfg.toolOrder : [],
+    bookmarks: Array.isArray(cfg.bookmarks) ? cfg.bookmarks : [],
+    theme: cfg.theme === 'light' ? 'light' : 'dark',
     platform: process.platform,
   };
 });
@@ -1005,6 +1057,20 @@ ipcMain.handle('cove:config:setPreferences', (_e, prefs = {}) => {
   if (typeof prefs.startMinimized === 'boolean')  cfg.startMinimized  = prefs.startMinimized;
   if (typeof prefs.launchOnStartup === 'boolean') cfg.launchOnStartup = prefs.launchOnStartup;
   if (typeof prefs.closeAfterLaunch === 'boolean') cfg.closeAfterLaunch = prefs.closeAfterLaunch;
+  // Renderer-driven UX prefs. Validate shape so a malformed renderer
+  // can't write garbage that breaks subsequent reads.
+  if (Array.isArray(prefs.toolOrder)) {
+    cfg.toolOrder = prefs.toolOrder.filter(s => typeof s === 'string' && isValidSlug(s));
+  }
+  if (Array.isArray(prefs.bookmarks)) {
+    const seen = new Set();
+    cfg.bookmarks = prefs.bookmarks
+      .filter(s => typeof s === 'string' && isValidSlug(s) && !seen.has(s) && seen.add(s))
+      .sort();
+  }
+  if (prefs.theme === 'light' || prefs.theme === 'dark') {
+    cfg.theme = prefs.theme;
+  }
   writeConfig(cfg);
   applyLoginItem(cfg);
   return {
@@ -1013,6 +1079,9 @@ ipcMain.handle('cove:config:setPreferences', (_e, prefs = {}) => {
     startMinimized: cfg.startMinimized,
     launchOnStartup: cfg.launchOnStartup,
     closeAfterLaunch: cfg.closeAfterLaunch,
+    toolOrder: Array.isArray(cfg.toolOrder) ? cfg.toolOrder : [],
+    bookmarks: Array.isArray(cfg.bookmarks) ? cfg.bookmarks : [],
+    theme: cfg.theme === 'light' ? 'light' : 'dark',
   };
 });
 

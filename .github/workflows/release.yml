@@ -1,0 +1,142 @@
+name: Release
+
+# Tag-driven release. Push a tag of the form `v*` (e.g. v2.0.7) and this
+# workflow builds the AppImage + .deb on Linux, the NSIS Setup.exe + Portable.exe
+# on Windows, generates `.sha256` sidecars for every shipping artifact (handled
+# by build/afterAllArtifactBuild.js for the binaries and build/postReleaseSidecars.js
+# for the latest*.yml auto-update metadata), and publishes the GitHub Release.
+#
+# The release is created as a draft by both build jobs (electron-publish's
+# default for the GitHub provider). The finalize job runs only after both
+# builds succeed: it pulls the latest*.yml metadata files from the draft,
+# generates their .sha256 sidecars, uploads them, and promotes the draft to
+# a public release. End users only see the release once every sidecar is in
+# place.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v2.0.7) — must already exist on the repo'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build Linux (AppImage + deb)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build & publish (Linux)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --linux --publish=always
+
+  build-windows:
+    name: Build Windows (Setup.exe + Portable.exe)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build & publish (Windows)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --publish=always
+
+  finalize:
+    name: Finalize sidecars + publish draft
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # postReleaseSidecars.js scans ./release/ for `latest*.yml` files,
+      # generates `.sha256` sidecars, uploads them to the draft release, and
+      # then promotes the draft. We download just the metadata files; the
+      # script handles the rest. Filenames follow electron-builder's
+      # convention: latest.yml (Windows), latest-linux.yml (Linux).
+      - name: Download auto-update metadata from draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "Downloading latest*.yml from draft release $TAG"
+          # `gh release download --pattern` matches against asset names. The
+          # draft is the only release at this tag at this point.
+          gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern 'latest*.yml' \
+            --dir release \
+            --skip-existing
+          ls -la release
+
+      - name: Generate sidecars + promote draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node build/postReleaseSidecars.js
+
+      # postReleaseSidecars.js publishes the draft but doesn't touch the
+      # release body. Earlier releases were hand-edited; do it in CI so
+      # `.release-notes-vX.Y.Z.md` becomes the canonical source of the
+      # GitHub release description. Also normalise the release name to
+      # match prior releases ("2.0.7", not "v2.0.7"). No-op if the notes
+      # file is absent so a hotfix without notes still ships.
+      - name: Set release body + name from notes file
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag || github.ref_name }}"
+          NAME="${TAG#v}"
+          NOTES_FILE=".release-notes-${TAG}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            echo "Setting body from $NOTES_FILE and name to $NAME"
+            gh release edit "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "$NAME" \
+              --notes-file "$NOTES_FILE"
+          else
+            echo "No $NOTES_FILE found — leaving release body unchanged."
+          fi
