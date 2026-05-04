@@ -333,7 +333,7 @@
     const el = document.createElement('div');
     el.textContent = msg;
     const border = kind === 'error' ? 'rgba(255,107,107,0.4)' : 'var(--border-strong)';
-    el.style.cssText = `pointer-events:auto;background:var(--bg-deep);color:var(--text);border:1px solid ${border};border-radius:10px;padding:10px 14px;font-size:12.5px;max-width:360px;box-shadow:0 20px 40px -20px var(--shadow-strong);opacity:0;transition:opacity 160ms, transform 160ms;transform:translateY(-4px);`;
+    el.style.cssText = `pointer-events:auto;background:var(--bg-deep);color:var(--text);border:1px solid ${border};border-radius:10px;padding:10px 14px;font-size:0.78125rem;max-width:360px;box-shadow:0 20px 40px -20px var(--shadow-strong);opacity:0;transition:opacity 160ms, transform 160ms;transform:translateY(-4px);`;
     host.appendChild(el);
     requestAnimationFrame(() => { el.style.opacity = '1'; el.style.transform = 'translateY(0)'; });
     setTimeout(() => {
@@ -591,7 +591,7 @@
       }
     }
     menu.innerHTML = items.map((it, i) =>
-      `<button data-i="${i}" style="all:unset;cursor:pointer;display:block;width:100%;padding:8px 12px;font-size:12.5px;color:${it.danger ? '#ff6b6b' : 'var(--text)'};border-radius:6px;">${escapeAttr(it.label)}</button>`
+      `<button data-i="${i}" style="all:unset;cursor:pointer;display:block;width:100%;padding:8px 12px;font-size:0.78125rem;color:${it.danger ? '#ff6b6b' : 'var(--text)'};border-radius:6px;">${escapeAttr(it.label)}</button>`
     ).join('');
     menu.style.cssText = 'position:fixed;z-index:70;background:var(--bg-deep);border:1px solid var(--border-strong);border-radius:10px;padding:4px;min-width:200px;box-shadow:0 20px 40px -16px var(--shadow-strong);';
     document.body.appendChild(menu);
@@ -686,6 +686,34 @@
     coveAPI.config.setPreferences({ theme: state.theme }).catch(() => {});
   }
 
+  const APP_FONT_SIZE_MIN = 13;
+  const APP_FONT_SIZE_MAX = 22;
+  const APP_FONT_SIZE_STEP = 1;
+
+  function clampAppFontSize(value, baseline) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 16;
+    const base = Number(baseline);
+    const min = Number.isFinite(base) ? Math.min(APP_FONT_SIZE_MIN, base) : APP_FONT_SIZE_MIN;
+    const max = Number.isFinite(base) ? Math.max(APP_FONT_SIZE_MAX, base) : APP_FONT_SIZE_MAX;
+    return Math.min(max, Math.max(min, n));
+  }
+
+  function applyAppFontSize(value) {
+    if (value == null) {
+      document.documentElement.style.removeProperty('font-size');
+      return;
+    }
+    document.documentElement.style.fontSize = `${clampAppFontSize(value, currentAppFontSize())}px`;
+  }
+
+  function currentAppFontSize() {
+    const computed = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    if (Number.isFinite(computed)) return computed;
+    if (currentTweaks.appFontSize != null) return clampAppFontSize(currentTweaks.appFontSize);
+    return 16;
+  }
+
   function applyTweaks(t) {
     if (t.accent) {
       document.documentElement.style.setProperty('--accent', t.accent);
@@ -705,6 +733,7 @@
       document.body.dataset.chrome = t.chrome;
       document.querySelectorAll('#chrome-seg button').forEach(b => b.classList.toggle('active', b.dataset.chrome === t.chrome));
     }
+    if (Object.prototype.hasOwnProperty.call(t, 'appFontSize')) applyAppFontSize(t.appFontSize);
   }
 
   let savedTweaks = {};
@@ -755,9 +784,27 @@
   });
 
   document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+    const hasShortcutModifier = e.ctrlKey || e.metaKey;
+    const plusKey = e.key === '+' || e.key === '=' || e.code === 'Equal' || e.code === 'NumpadAdd';
+    const minusKey = e.key === '-' || e.code === 'Minus' || e.code === 'NumpadSubtract';
+    const resetFontKey = e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0';
+
+    if (hasShortcutModifier && e.key === ',') {
       e.preventDefault();
       tweaksPanel.classList.toggle('show');
+    }
+    if (hasShortcutModifier && (plusKey || minusKey || resetFontKey)) {
+      e.preventDefault();
+      if (resetFontKey) {
+        delete currentTweaks.appFontSize;
+        applyAppFontSize(null);
+      } else {
+        const delta = plusKey ? APP_FONT_SIZE_STEP : -APP_FONT_SIZE_STEP;
+        const currentSize = currentAppFontSize();
+        currentTweaks.appFontSize = clampAppFontSize(currentSize + delta, currentSize);
+        applyAppFontSize(currentTweaks.appFontSize);
+      }
+      persistTweaks();
     }
     if (e.key === 'Escape' && tweaksPanel.classList.contains('show')) {
       tweaksPanel.classList.remove('show');
