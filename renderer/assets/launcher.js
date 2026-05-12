@@ -230,9 +230,18 @@
     const prog = slug && window.PROGRAMS.find(p => p.slug === slug);
     if (!prog) return;
     if (action === 'focus') {
-      // v2: conservative focus — no OS-level window focus hacks yet.
       if (state.foxyMode) ensureTab(prog);
-      toast(`${prog.name} is already running.`);
+      if (IS_DESKTOP) {
+        coveAPI.processFocus(prog.slug).then(res => {
+          if (res?.focused) {
+            toast(`Focused ${prog.name}.`);
+          } else {
+            toast(`${prog.name} is already running.`);
+          }
+        }).catch(() => toast(`${prog.name} is already running.`));
+      } else {
+        toast(`${prog.name} is already running.`);
+      }
     }
     else if (action === 'launch') doLaunch(prog);
     else if (action === 'install') doInstall(prog);
