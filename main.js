@@ -433,6 +433,7 @@ function readConfig() {
     startMinimized: !!raw?.startMinimized,
     launchOnStartup: !!raw?.launchOnStartup,
     closeAfterLaunch: !!raw?.closeAfterLaunch,
+    foxyMode: !!raw?.foxyMode,
     toolOrder,
     bookmarks,
     theme,
@@ -1083,6 +1084,7 @@ ipcMain.handle('cove:config:get', () => {
     startMinimized: !!cfg.startMinimized,
     launchOnStartup: !!cfg.launchOnStartup,
     closeAfterLaunch: !!cfg.closeAfterLaunch,
+    foxyMode: !!cfg.foxyMode,
     toolOrder: Array.isArray(cfg.toolOrder) ? cfg.toolOrder : [],
     bookmarks: Array.isArray(cfg.bookmarks) ? cfg.bookmarks : [],
     theme: cfg.theme === 'light' ? 'light' : 'dark',
@@ -1096,6 +1098,7 @@ ipcMain.handle('cove:config:setPreferences', (_e, prefs = {}) => {
   if (typeof prefs.startMinimized === 'boolean')  cfg.startMinimized  = prefs.startMinimized;
   if (typeof prefs.launchOnStartup === 'boolean') cfg.launchOnStartup = prefs.launchOnStartup;
   if (typeof prefs.closeAfterLaunch === 'boolean') cfg.closeAfterLaunch = prefs.closeAfterLaunch;
+  if (typeof prefs.foxyMode === 'boolean') cfg.foxyMode = prefs.foxyMode;
   // Renderer-driven UX prefs. Validate shape so a malformed renderer
   // can't write garbage that breaks subsequent reads.
   if (Array.isArray(prefs.toolOrder)) {
