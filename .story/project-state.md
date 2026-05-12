@@ -34,7 +34,7 @@ Cove Nexus is an Electron-based launcher for Cove tools. It installs, launches, 
 
 ## Upcoming
 
-- **T-001 Foxy Mode v1** — browser-style tool tabs inside the launcher (opt-in, default off). See `.story/tickets/T-001-foxy-mode-v1.md`.
+- **T-001 Foxy Mode v1** — browser-style tool tabs inside the launcher (opt-in, default off). Implementation plan ready (2026-05-11) in `.story/tickets/T-001-foxy-mode-v1.md`; see also `.story/handovers/2026-05-11-t001-foxy-mode-v1-plan.md`.
 
 ## Conventions / constraints
 
