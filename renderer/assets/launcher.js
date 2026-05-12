@@ -31,11 +31,185 @@
     toolOrder: [],
     bookmarks: new Set(),
     theme: 'dark',
+    foxyMode: false,
+    tabs: [],
+    activeTabId: 'home',
   };
 
   function iconFor(name) {
     return (window.ICONS && window.ICONS[name]) || window.ICONS.upscale;
   }
+
+  // ── Foxy Mode helpers ──────────────────────────────────────────────────────
+
+  function setFoxyMode(on) {
+    state.foxyMode = on;
+    if (on) {
+      document.body.setAttribute('data-foxy', '1');
+      if (!state.tabs.length) state.tabs = [{ id: 'home', kind: 'home', title: 'Home' }];
+    } else {
+      document.body.removeAttribute('data-foxy');
+      state.tabs = [];
+      state.activeTabId = 'home';
+      const mainEl = document.querySelector('main.main');
+      if (mainEl) mainEl.classList.remove('tab-tool');
+    }
+    renderTabs();
+    renderToolSession();
+  }
+
+  function ensureTab(prog) {
+    const existing = state.tabs.find(t => t.slug === prog.slug);
+    if (existing) {
+      state.activeTabId = existing.id;
+    } else {
+      const tab = { id: prog.slug, kind: 'tool', slug: prog.slug, title: prog.name };
+      state.tabs.push(tab);
+      state.activeTabId = prog.slug;
+    }
+  }
+
+  function closeTab(id) {
+    if (id === 'home') return;
+    const idx = state.tabs.findIndex(t => t.id === id);
+    if (idx === -1) return;
+    state.tabs.splice(idx, 1);
+    if (state.activeTabId === id) {
+      const prev = state.tabs[idx - 1] || state.tabs[0];
+      state.activeTabId = prev ? prev.id : 'home';
+    }
+  }
+
+  function renderTabs() {
+    const container = document.getElementById('foxy-tabs');
+    if (!container) return;
+    if (!state.foxyMode) { container.innerHTML = ''; return; }
+    container.innerHTML = state.tabs.map(tab => {
+      const isActive = tab.id === state.activeTabId;
+      const tabId = escapeAttr(tab.id);
+      const tabTitle = escapeAttr(tab.title);
+      const closeBtn = tab.kind !== 'home'
+        ? `<button class="foxy-tab-close" data-close-tab="${tabId}" aria-label="Close ${tabTitle} tab">×</button>`
+        : '';
+      return `<span class="foxy-tab${isActive ? ' active' : ''}" data-tab-id="${tabId}">` +
+        `<button class="foxy-tab-activate" data-tab-id="${tabId}" role="tab" aria-selected="${isActive}">${tabTitle}</button>` +
+        closeBtn +
+        `</span>`;
+    }).join('');
+  }
+
+  function renderToolSession() {
+    const session = document.getElementById('foxy-session');
+    const mainEl = document.querySelector('main.main');
+    if (!session || !mainEl) return;
+    if (!state.foxyMode || state.activeTabId === 'home') {
+      mainEl.classList.remove('tab-tool');
+      session.hidden = true;
+      return;
+    }
+    const tab = state.tabs.find(t => t.id === state.activeTabId);
+    if (!tab) {
+      mainEl.classList.remove('tab-tool');
+      session.hidden = true;
+      return;
+    }
+    const prog = window.PROGRAMS.find(p => p.slug === tab.slug);
+    if (!prog) {
+      mainEl.classList.remove('tab-tool');
+      session.hidden = true;
+      return;
+    }
+    const installed = isInstalled(prog);
+    const update = installed && hasUpdate(prog);
+    const busy = state.busy[prog.slug];
+    const icon = iconFor(prog.icon);
+    const githubUrl = `https://github.com/Sin213/${prog.slug}`;
+    const notesUrl = state.releaseNotes[prog.slug]?.url || '';
+    const slug = escapeAttr(prog.slug);
+    const name = escapeAttr(prog.name);
+    const version = prog.version ? `v${escapeAttr(prog.version)}` : '';
+    const latestTag = escapeAttr((prog.latestTag || '').replace(/^v/, ''));
+    const githubUrlAttr = escapeAttr(githubUrl);
+    const notesUrlAttr = escapeAttr(notesUrl);
+
+    const badges = [
+      installed
+        ? `<span class="foxy-pill installed">Installed${version ? ' ' + version : ''}</span>`
+        : `<span class="foxy-pill">Not installed</span>`,
+      update
+        ? `<span class="foxy-pill update">Update available${latestTag ? ' v' + latestTag : ''}</span>`
+        : '',
+      installed
+        ? `<span class="foxy-pill running">Running</span>`
+        : '',
+    ].filter(Boolean).join('');
+
+    const launchLabel = busy === 'launching' ? 'Launching…'
+      : busy === 'installing' ? 'Installing…'
+      : !installed ? 'Install & Launch'
+      : 'Launch';
+    const launchAction = !installed ? 'install' : 'launch';
+
+    session.innerHTML = `
+      <div class="foxy-session-header">
+        <div class="foxy-session-icon">${icon}</div>
+        <div class="foxy-session-meta">
+          <div class="foxy-session-name">${name}</div>
+          <div class="foxy-session-slug">${slug}</div>
+          <div class="foxy-session-badges">${badges}</div>
+        </div>
+      </div>
+      <div class="foxy-session-actions">
+        <button class="btn btn-primary" data-action="${launchAction}" data-slug="${slug}"${busy ? ' disabled' : ''}>
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          ${launchLabel}
+        </button>
+        ${update ? `<button class="btn btn-ghost" data-action="update" data-slug="${slug}"${busy ? ' disabled' : ''}>Update</button>` : ''}
+        ${installed ? `<button class="btn btn-ghost" data-action="reveal" data-slug="${slug}">Reveal install folder</button>` : ''}
+        <button class="btn btn-ghost" data-action="github" data-url="${githubUrlAttr}">GitHub</button>
+        ${notesUrl ? `<button class="btn btn-ghost" data-action="notes" data-url="${notesUrlAttr}">Release notes</button>` : ''}
+      </div>
+      <p class="foxy-session-note">The app runs as a separate window outside Cove Nexus. Switch to it in your OS taskbar to use it.</p>
+    `;
+    session.hidden = false;
+    mainEl.classList.add('tab-tool');
+  }
+
+  // Delegated click handler for foxy tab strip
+  document.getElementById('foxy-tabs')?.addEventListener('click', (e) => {
+    const closeBtn = e.target.closest('[data-close-tab]');
+    if (closeBtn) {
+      closeTab(closeBtn.dataset.closeTab);
+      renderTabs();
+      renderToolSession();
+      return;
+    }
+    const activateBtn = e.target.closest('[data-tab-id]');
+    if (activateBtn) {
+      state.activeTabId = activateBtn.dataset.tabId;
+      renderTabs();
+      renderToolSession();
+    }
+  });
+
+  // Delegated click handler for foxy session page actions
+  document.getElementById('foxy-session')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    const slug = btn.dataset.slug;
+    const url = btn.dataset.url;
+    if (action === 'github' || action === 'notes') {
+      if (url) window.open(url, '_blank');
+      return;
+    }
+    const prog = slug && window.PROGRAMS.find(p => p.slug === slug);
+    if (!prog) return;
+    if (action === 'launch') doLaunch(prog);
+    else if (action === 'install') doInstall(prog);
+    else if (action === 'update') doUpdate(prog);
+    else if (action === 'reveal' && IS_DESKTOP) coveAPI.revealInstall(prog.slug);
+  });
 
   function isInstalled(p) {
     if (state.installedOverride[p.slug] !== undefined) return state.installedOverride[p.slug];
@@ -279,6 +453,8 @@
 
     renderUpdateBanner(updates);
     renderFeatured();
+    renderTabs();
+    renderToolSession();
   }
 
   function renderUpdateBanner(updates) {
@@ -384,6 +560,7 @@
       } else {
         await new Promise(r => setTimeout(r, 900));
       }
+      if (state.foxyMode) { ensureTab(prog); }
     } catch (e) {
       toast(`Launch failed: ${e.message}`, 'error');
     } finally {
@@ -426,6 +603,7 @@
         state.onDisk.delete(slug);
       }
       state.installedOverride[slug] = false;
+      if (state.foxyMode) closeTab(slug);
       toast(`${prog.name} removed`);
       render();
     } catch (e) {
@@ -631,6 +809,7 @@
       document.querySelectorAll('#nav-library button, #nav-categories button').forEach(x => x.classList.remove('active'));
       b.classList.add('active');
       state.filter = b.dataset.filter;
+      if (state.foxyMode) state.activeTabId = 'home';
       render();
     });
   });
@@ -1031,10 +1210,12 @@
       const prefLOS   = document.getElementById('pref-launch-on-startup');
       const prefNote  = document.getElementById('pref-launch-note');
       const prefCAL  = document.getElementById('pref-close-after-launch');
+      const prefFoxy = document.getElementById('pref-foxy-mode');
       if (prefMTT)  prefMTT.checked  = !!cfg.minimizeToTray;
       if (prefSM)   prefSM.checked   = !!cfg.startMinimized;
       if (prefLOS)  prefLOS.checked  = !!cfg.launchOnStartup;
       if (prefCAL)  prefCAL.checked  = !!cfg.closeAfterLaunch;
+      if (prefFoxy) prefFoxy.checked = !!cfg.foxyMode;
       if (prefLOS && cfg.platform === 'linux') {
         prefLOS.disabled = false;
         if (prefNote) prefNote.textContent = '— creates an XDG autostart entry when enabled.';
@@ -1052,6 +1233,14 @@
   document.getElementById('pref-start-minimized')?.addEventListener('change',  (e) => savePrefs({ startMinimized: e.target.checked }));
   document.getElementById('pref-launch-on-startup')?.addEventListener('change', (e) => savePrefs({ launchOnStartup: e.target.checked }));
   document.getElementById('pref-close-after-launch')?.addEventListener('change', (e) => savePrefs({ closeAfterLaunch: e.target.checked }));
+  document.getElementById('pref-foxy-mode')?.addEventListener('change', (e) => {
+    setFoxyMode(e.target.checked);
+    savePrefs({ foxyMode: e.target.checked });
+  });
+  if (!IS_DESKTOP) {
+    const rowFoxy = document.getElementById('row-foxy-mode');
+    if (rowFoxy) rowFoxy.style.display = 'none';
+  }
 
   // Tray → "Check for updates"
   if (IS_DESKTOP && coveAPI.onTrayCheckUpdates) {
@@ -1306,6 +1495,11 @@
             applyTheme(cfgTheme);
             currentTweaks.theme = cfgTheme;
             persistTweaks();
+          }
+          if (cfg.foxyMode) {
+            state.foxyMode = true;
+            document.body.setAttribute('data-foxy', '1');
+            state.tabs = [{ id: 'home', kind: 'home', title: 'Home' }];
           }
         }
       } catch {}
