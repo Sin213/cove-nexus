@@ -1,0 +1,14 @@
+{
+  "blockedBy": [
+    "T-004"
+  ],
+  "completedDate": null,
+  "createdDate": "2026-05-12",
+  "description": "Design and implement the in-Nexus app host for Foxy Mode v5.\n\n**Status:** Design approved pending review. Implementation deferred until design is approved and T-004 (v4 protocol) is implemented.\n\n**Spec:** `docs/superpowers/specs/2026-05-12-foxy-mode-v5-in-nexus-app-host-design.md`\n\n**Summary:**\n- Introduces `openMode: \"external\" | \"tab-web\"` per app in `programs.js`.\n- Apps with `openMode: \"tab-web\"` serve a local HTTP UI on `127.0.0.1:PORT` and send a new `tab_ready` v4 protocol message containing the URL.\n- Nexus creates a `WebContentsView` (Electron 33, sandboxed, no Node integration, context isolation) to host the app UI within the Foxy tab.\n- URL validation: only `http://127.0.0.1:<port>` received via the v4 socket for the matching `runId` is accepted.\n- Falls back to `fallbackMode: \"external\"` if `tab_ready` doesn't arrive within 10 s or the view fails to load.\n- First experiment: `cove-meme-maker` (simplest UI, no heavy native deps, low filesystem risk).\n\n**Implementation phases:**\n1. Implement T-004 (v4 protocol) — prerequisite.\n2. Extend v4 with `tab_ready`, add WebContentsView host in Nexus.\n3. Adopt in cove-meme-maker as first app experiment.\n4. Polish and harden.\n\n**Out of scope:** native embedding, window reparenting, macOS, bidirectional messaging, Node access in hosted content, remote URLs, tab persistence.",
+  "id": "T-005",
+  "order": 50,
+  "phase": "features",
+  "status": "open",
+  "title": "Foxy Mode v5 — in-Nexus app host design",
+  "type": "feature"
+}
