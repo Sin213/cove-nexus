@@ -1,0 +1,12 @@
+{
+  "blockedBy": [],
+  "completedDate": null,
+  "createdDate": "2026-05-12",
+  "description": "Design and implement the optional Cove app protocol for Foxy Mode v4.\n\n**Status:** Design approved. Implementation deferred until at least one Cove app is ready to adopt the protocol.\n\n**Spec:** `docs/superpowers/specs/2026-05-12-foxy-mode-v4-cove-app-protocol-design.md`\n\n**Summary:**\n- Linux-only Unix domain socket transport (v4 scope).\n- Per-launch socket at `$XDG_RUNTIME_DIR/cove-nexus/<runId>.sock` (fallback: mkdtemp).\n- Nexus injects `COVE_NEXUS`, `COVE_NEXUS_PROTOCOL_VERSION`, `COVE_NEXUS_TOOL_SLUG`, `COVE_NEXUS_RUN_ID`, `COVE_NEXUS_APP_NAME`, `COVE_NEXUS_SOCKET` into spawned app env.\n- App → Nexus one-way NDJSON messages: `app_ready`, `status_update`, `active_document`, `progress_update`, `notification`, `app_exiting`.\n- Protocol state stored in `processRegistry[slug].protocol`; broadcast via existing `cove:process:update` IPC.\n- Non-protocol apps unchanged (v2 behavior).\n\n**Out of scope:** macOS, Windows named pipes, file-based fallback, bidirectional messaging, embedding, reparenting.",
+  "id": "T-004",
+  "order": 40,
+  "phase": "features",
+  "status": "open",
+  "title": "Foxy Mode v4 — optional Cove app protocol design",
+  "type": "feature"
+}
