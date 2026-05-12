@@ -1246,14 +1246,69 @@ ipcMain.handle('cove:update', async (_e, slug) => {
   catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
 
+// ── Process registry ──────────────────────────────────────────────────────
+// Main process is the sole source of truth for tool lifecycle state.
+// Renderer receives serialized snapshots only — child refs never cross IPC.
+
+const processRegistry = new Map();
+
+function serializeEntry(slug) {
+  const e = processRegistry.get(slug);
+  if (!e) return null;
+  return {
+    slug: e.slug,
+    pid: e.pid ?? null,
+    status: e.status,
+    startedAt: e.startedAt,
+    exitedAt: e.exitedAt ?? null,
+    exitCode: e.exitCode ?? null,
+    signal: e.signal ?? null,
+    lastError: e.lastError ?? null,
+    processUpdatedAt: e.processUpdatedAt,
+  };
+}
+
+function broadcastProcessUpdate(slug, previousStatus) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('cove:process:update', {
+    slug,
+    previousStatus: previousStatus ?? null,
+    state: serializeEntry(slug),
+  });
+}
+
+ipcMain.handle('cove:process:list', () => {
+  const out = {};
+  for (const [slug] of processRegistry) out[slug] = serializeEntry(slug);
+  return out;
+});
+
 ipcMain.handle('cove:launch', async (_e, slug) => {
   if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
   if (isLegacyClone(slug)) {
     return { ok: false, error: 'This install is from an older version. Click Update to reinstall as a binary.' };
   }
+
+  // Nonce guard: prevent duplicate spawns. Fires before any async work so
+  // rapid double-clicks are resolved by the registry, not by the busy flag alone.
+  const existing = processRegistry.get(slug);
+  if (existing && (existing.status === 'launching' || existing.status === 'running')) {
+    return { ok: true, alreadyRunning: true, kind: 'app' };
+  }
+
   const info = readRegistry()[slug];
   if (!info?.path) return { ok: false, error: 'Not installed.' };
   if (!exists(info.path)) return { ok: false, error: `Missing: ${info.path}` };
+
+  // Mark launching immediately — before spawn — so any concurrent IPC call
+  // hits the nonce guard above.
+  const now = Date.now();
+  processRegistry.set(slug, {
+    slug, child: null, pid: null, status: 'launching',
+    startedAt: now, exitedAt: null, exitCode: null,
+    signal: null, lastError: null, processUpdatedAt: now,
+  });
+  broadcastProcessUpdate(slug, null);
 
   const plan = planFromPath(info.path);
   try {
@@ -1263,24 +1318,87 @@ ipcMain.handle('cove:launch', async (_e, slug) => {
       stdio: 'ignore',
       env: buildLaunchEnv(),
     });
+
+    // Store child ref and capture pid immediately so fast-exiting processes
+    // still preserve lastKnownPid in the exited registry entry.
+    processRegistry.get(slug).child = child;
+    processRegistry.get(slug).pid = child.pid ?? null;
+
+    // Exit listener — covers both normal close and crash.
+    // Does not overwrite 'failed' status set by the error handler.
+    child.once('exit', (code, signal) => {
+      const prev = processRegistry.get(slug);
+      if (!prev || prev.status === 'failed') return;
+      const prevStatus = prev.status;
+      processRegistry.set(slug, {
+        ...prev,
+        child: null,
+        status: 'exited',
+        exitCode: code ?? null,
+        signal: signal ?? null,
+        exitedAt: Date.now(),
+        processUpdatedAt: Date.now(),
+      });
+      broadcastProcessUpdate(slug, prevStatus);
+    });
+
+    // Unref after listeners are attached so child outlives Nexus but
+    // exit/error events still reach us while the event loop is running.
     child.unref();
-    // Let the OS surface ENOENT/EACCES synchronously before we report
-    // success. Without this, a failed spawn looked identical to a launch.
+
+    // Let the OS surface ENOENT/EACCES synchronously before reporting success.
     return await new Promise((resolve) => {
       let settled = false;
+
       child.once('error', (err) => {
         if (settled) return;
         settled = true;
+        const prev = processRegistry.get(slug);
+        const prevStatus = prev?.status ?? null;
+        processRegistry.set(slug, {
+          ...(prev ?? { slug }),
+          child: null,
+          status: 'failed',
+          lastError: String(err?.message || err),
+          exitedAt: Date.now(),
+          processUpdatedAt: Date.now(),
+        });
+        broadcastProcessUpdate(slug, prevStatus);
         resolve({ ok: false, error: String(err?.message || err) });
       });
+
       setTimeout(() => {
         if (settled) return;
         settled = true;
-        if (readConfig().closeAfterLaunch && mainWindow) mainWindow.hide();
+        const prev = processRegistry.get(slug);
+        const prevStatus = prev?.status ?? null;
+        // Only transition if still launching (process may have exited in <600ms).
+        if (prev?.status === 'launching') {
+          processRegistry.set(slug, {
+            ...prev,
+            pid: child.pid ?? null,
+            status: 'running',
+            processUpdatedAt: Date.now(),
+          });
+          broadcastProcessUpdate(slug, prevStatus);
+        }
+        // Guard: do not hide Nexus while Foxy Mode is on.
+        if (readConfig().closeAfterLaunch && !readConfig().foxyMode && mainWindow) mainWindow.hide();
         resolve({ ok: true, kind: plan.kind });
       }, 600);
     });
   } catch (err) {
+    const prev = processRegistry.get(slug);
+    const prevStatus = prev?.status ?? null;
+    processRegistry.set(slug, {
+      ...(prev ?? { slug }),
+      child: null,
+      status: 'failed',
+      lastError: String(err?.message || err),
+      exitedAt: Date.now(),
+      processUpdatedAt: Date.now(),
+    });
+    broadcastProcessUpdate(slug, prevStatus);
     return { ok: false, error: String(err?.message || err) };
   }
 });

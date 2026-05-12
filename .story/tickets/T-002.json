@@ -1,0 +1,12 @@
+{
+  "blockedBy": [],
+  "completedDate": "2026-05-12",
+  "createdDate": "2026-05-12",
+  "description": "Add process lifecycle tracking to Cove Nexus Foxy Mode. Main process owns a processRegistry Map; renderer mirrors state via push IPC events (cove:process:update). Adds duplicate launch prevention, live status pills on the session page (Running / Launching / Not running / Failed), \"Focus App\" conservative action (tab activation + toast, no OS focus hacks), and a subtle running dot on grid cards. Files changed: main.js, preload.js, renderer/assets/launcher.js, renderer/index.html. Deferred: OS focus hacks, tab persistence, multi-instance awareness, protocol layer.",
+  "id": "T-002",
+  "order": 20,
+  "phase": "features",
+  "status": "complete",
+  "title": "Foxy Mode v2 — process tracking / running state",
+  "type": "feature"
+}

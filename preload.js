@@ -26,6 +26,13 @@ contextBridge.exposeInMainWorld('coveAPI', {
     return () => ipcRenderer.removeListener('cove:install:progress', h);
   },
 
+  processList: () => ipcRenderer.invoke('cove:process:list'),
+  onProcessUpdate: (cb) => {
+    const h = (_e, payload) => cb(payload);
+    ipcRenderer.on('cove:process:update', h);
+    return () => ipcRenderer.removeListener('cove:process:update', h);
+  },
+
   config: {
     get:                 () => ipcRenderer.invoke('cove:config:get'),
     setProgramsRoot:     () => ipcRenderer.invoke('cove:config:setProgramsRoot'),

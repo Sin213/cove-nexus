@@ -34,6 +34,7 @@
     foxyMode: false,
     tabs: [],
     activeTabId: 'home',
+    processes: {},
   };
 
   function iconFor(name) {
@@ -78,6 +79,20 @@
       const prev = state.tabs[idx - 1] || state.tabs[0];
       state.activeTabId = prev ? prev.id : 'home';
     }
+  }
+
+  function processStatusFor(slug) {
+    return state.processes[slug]?.status ?? 'not_running';
+  }
+
+  // Maps canonical lifecycle state to a UI label.
+  // 'exited' renders as "Not running" so closed apps feel cleanly stopped.
+  function displayStatusFor(slug) {
+    const s = processStatusFor(slug);
+    if (s === 'running')   return 'Running';
+    if (s === 'launching') return 'Launching';
+    if (s === 'failed')    return 'Failed';
+    return 'Not running';
   }
 
   function renderTabs() {
@@ -132,6 +147,9 @@
     const githubUrlAttr = escapeAttr(githubUrl);
     const notesUrlAttr = escapeAttr(notesUrl);
 
+    const procStatus = processStatusFor(prog.slug);
+    const procCssClass = procStatus.replace(/_/g, '-'); // 'not_running' → 'not-running'
+
     const badges = [
       installed
         ? `<span class="foxy-pill installed">Installed${version ? ' ' + version : ''}</span>`
@@ -140,15 +158,21 @@
         ? `<span class="foxy-pill update">Update available${latestTag ? ' v' + latestTag : ''}</span>`
         : '',
       installed
-        ? `<span class="foxy-pill running">Running</span>`
+        ? `<span class="foxy-pill ${procCssClass}">${displayStatusFor(prog.slug)}</span>`
         : '',
     ].filter(Boolean).join('');
 
-    const launchLabel = busy === 'launching' ? 'Launching…'
-      : busy === 'installing' ? 'Installing…'
+    const isRunning   = procStatus === 'running';
+    const isLaunching = procStatus === 'launching' || busy === 'launching';
+
+    // Priority: installing > launching > not-installed > running > default
+    const launchLabel = busy === 'installing' ? 'Installing…'
+      : isLaunching ? 'Launching…'
       : !installed ? 'Install & Launch'
+      : isRunning ? 'Focus App'
       : 'Launch';
-    const launchAction = !installed ? 'install' : 'launch';
+    const launchAction = !installed ? 'install' : isRunning ? 'focus' : 'launch';
+    const launchDisabled = isLaunching || busy === 'installing';
 
     session.innerHTML = `
       <div class="foxy-session-header">
@@ -160,7 +184,7 @@
         </div>
       </div>
       <div class="foxy-session-actions">
-        <button class="btn btn-primary" data-action="${launchAction}" data-slug="${slug}"${busy ? ' disabled' : ''}>
+        <button class="btn btn-primary" data-action="${launchAction}" data-slug="${slug}"${launchDisabled ? ' disabled' : ''}>
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
           ${launchLabel}
         </button>
@@ -205,7 +229,12 @@
     }
     const prog = slug && window.PROGRAMS.find(p => p.slug === slug);
     if (!prog) return;
-    if (action === 'launch') doLaunch(prog);
+    if (action === 'focus') {
+      // v2: conservative focus — no OS-level window focus hacks yet.
+      if (state.foxyMode) ensureTab(prog);
+      toast(`${prog.name} is already running.`);
+    }
+    else if (action === 'launch') doLaunch(prog);
     else if (action === 'install') doInstall(prog);
     else if (action === 'update') doUpdate(prog);
     else if (action === 'reveal' && IS_DESKTOP) coveAPI.revealInstall(prog.slug);
@@ -372,9 +401,12 @@
       ? '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>'
       : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
 
+    const cardRunning = state.foxyMode && processStatusFor(p.slug) === 'running';
+
     return `
       <article class="card ${update ? 'pending' : ''} ${bookmarked ? 'bookmarked' : ''}" data-slug="${escapeAttr(p.slug)}" draggable="${reorderEnabled() ? 'true' : 'false'}">
         <div class="card-top">
+          ${cardRunning ? '<span class="card-running-dot" aria-label="Running" title="Running"></span>' : ''}
           <div class="app-icon">${iconFor(p.icon)}</div>
           <div class="card-title-row">
             <div class="row1">
@@ -555,6 +587,11 @@
     try {
       if (IS_DESKTOP) {
         const res = await coveAPI.launch(slug);
+        if (res.alreadyRunning) {
+          if (state.foxyMode) ensureTab(prog);
+          toast(`${prog.name} is already running.`);
+          return;
+        }
         if (!res.ok) throw new Error(res.error || 'launch failed');
         toast(`${prog.name} launched (${res.kind})`);
       } else {
@@ -1503,6 +1540,20 @@
           }
         }
       } catch {}
+    }
+    // Bootstrap process state from main process and subscribe to live updates.
+    if (IS_DESKTOP) {
+      try {
+        const snapshot = await coveAPI.processList();
+        if (snapshot && typeof snapshot === 'object') state.processes = snapshot;
+      } catch {}
+      coveAPI.onProcessUpdate(({ slug, state: s } = {}) => {
+        if (slug && s && typeof s === 'object') {
+          state.processes[slug] = s;
+          render();
+          renderToolSession();
+        }
+      });
     }
     render();
     // Now the slow path: network-backed scan, discovery, and release-notes.
