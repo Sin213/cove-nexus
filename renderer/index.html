@@ -725,27 +725,53 @@
   body:not([data-foxy]) #foxy-tabs,
   body:not([data-foxy]) #foxy-session { display: none; }
 
+  /* Remove main's top padding when foxy is on — tab strip sits flush at top */
+  body[data-foxy] main.main { padding-top: 0; }
+
+  /* Tab strip: transparent background, full bleed across the content column */
   #foxy-tabs {
-    display: flex; align-items: center; gap: 2px;
-    padding: 0 8px; height: 38px; flex-shrink: 0;
+    display: flex; align-items: flex-end; gap: 2px;
+    padding: 8px 32px 0;
+    margin: 0 -32px;
+    height: 46px; flex-shrink: 0;
     border-bottom: 1px solid var(--border);
-    background: var(--surface-2);
+    background: transparent;
     overflow-x: auto; overflow-y: hidden;
   }
   #foxy-tabs::-webkit-scrollbar { display: none; }
 
+  /* Breathing room: hero must not sit directly against the tab strip */
+  body[data-foxy] main.main > .hero { margin-top: 24px; }
+
   .foxy-tab {
     display: flex; align-items: center;
     border-radius: 6px 6px 0 0;
+    border: 1px solid transparent;
+    border-bottom: none;
     background: transparent;
-    transition: background 120ms;
+    position: relative;
+    transition: background 120ms, border-color 120ms;
+    flex-shrink: 0;
   }
-  .foxy-tab.active { background: var(--hover-1); }
-  .foxy-tab:not(.active):hover { background: var(--hover-2); }
+  .foxy-tab::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    border-radius: 2px 2px 0 0;
+    background: transparent;
+    transition: background 200ms;
+  }
+  .foxy-tab.active {
+    background: var(--surface-2);
+    border-color: var(--border);
+  }
+  .foxy-tab.active::before { background: var(--accent); }
+  .foxy-tab:not(.active):hover { background: var(--hover-1); }
 
   .foxy-tab-activate {
     appearance: none; border: none; background: transparent; cursor: pointer;
-    padding: 0 8px 0 10px; height: 36px;
+    padding: 0 8px 0 10px; height: 34px;
     font-size: 0.78125rem; color: var(--text-dim);
     max-width: 140px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     transition: color 120ms;
@@ -755,9 +781,9 @@
 
   .foxy-tab-close {
     appearance: none; border: none; background: transparent; cursor: pointer;
-    width: 20px; height: 20px; flex-shrink: 0; margin-right: 4px;
+    width: 18px; height: 18px; flex-shrink: 0; margin-right: 5px;
     display: flex; align-items: center; justify-content: center;
-    border-radius: 4px; color: var(--text-faint); font-size: 14px; line-height: 1;
+    border-radius: 4px; color: var(--text-faint); font-size: 13px; line-height: 1;
     transition: background 100ms, color 100ms;
   }
   .foxy-tab-close:hover { background: var(--hover-2); color: var(--text); }
