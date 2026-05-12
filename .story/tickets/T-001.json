@@ -1,0 +1,12 @@
+{
+  "blockedBy": [],
+  "completedDate": null,
+  "createdDate": "2026-05-12",
+  "description": "Add opt-in Foxy Mode toggle (default off) that renders launched tools as browser-style tabs inside the launcher. Permanent Home tab, closeable tool tabs, no native window embedding. Full spec and implementation plan in .story/tickets/T-001-foxy-mode-v1.md.\n\nFiles: main.js (readConfig, cove:config:get, cove:config:setPreferences, cove:launch hide-skip), renderer/index.html (tab strip, tool-session container, Settings checkbox, CSS), renderer/assets/launcher.js (state extension, tab helpers, doLaunch/doUninstall hooks, init wiring).",
+  "id": "T-001",
+  "order": 10,
+  "phase": "features",
+  "status": "open",
+  "title": "Foxy Mode v1: browser-style tool tabs",
+  "type": "feature"
+}
