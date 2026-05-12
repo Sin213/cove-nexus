@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('coveAPI', {
   },
 
   processList: () => ipcRenderer.invoke('cove:process:list'),
+  processFocus: (slug) => ipcRenderer.invoke('cove:process:focus', slug),
   onProcessUpdate: (cb) => {
     const h = (_e, payload) => cb(payload);
     ipcRenderer.on('cove:process:update', h);

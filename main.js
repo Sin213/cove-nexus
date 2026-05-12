@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage, saf
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 const os = require('node:os');
 const https = require('node:https');
 
@@ -1281,6 +1281,36 @@ ipcMain.handle('cove:process:list', () => {
   const out = {};
   for (const [slug] of processRegistry) out[slug] = serializeEntry(slug);
   return out;
+});
+
+ipcMain.handle('cove:process:focus', (_e, slug) => {
+  if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
+  const entry = processRegistry.get(slug);
+  if (!entry || entry.status !== 'running') return { ok: false, error: 'not running' };
+  const { pid } = entry;
+  if (!pid) return { ok: false, error: 'no pid' };
+
+  if (process.platform === 'linux') {
+    const sessionType = (process.env.XDG_SESSION_TYPE || '').toLowerCase();
+    if (sessionType === 'wayland') {
+      return { ok: true, focused: false, unsupported: true, reason: 'wayland' };
+    }
+    try {
+      const lp = execFileSync('wmctrl', ['-lp'], { encoding: 'utf8', timeout: 2000 });
+      const windowId = lp.split('\n')
+        .map(l => l.split(/\s+/))
+        .find(p => parseInt(p[2], 10) === pid)?.[0];
+      if (!windowId || !/^0x[0-9a-f]+$/i.test(windowId)) {
+        return { ok: true, focused: false, unsupported: true, reason: 'window-not-found' };
+      }
+      execFileSync('wmctrl', ['-ia', windowId], { timeout: 2000 });
+      return { ok: true, focused: true };
+    } catch {
+      return { ok: true, focused: false, unsupported: true, reason: 'wmctrl-unavailable' };
+    }
+  }
+
+  return { ok: true, focused: false, unsupported: true, reason: 'unsupported-platform' };
 });
 
 ipcMain.handle('cove:launch', async (_e, slug) => {
