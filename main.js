@@ -195,11 +195,50 @@ function setupTray() {
   }
 }
 
+function linuxAutostartFile() {
+  const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+  return path.join(configHome, 'autostart', `${APP_ID}.desktop`);
+}
+
+function quoteDesktopExecPath(exePath) {
+  return `"${String(exePath).replace(/%/g, '%%').replace(/(["\\`$])/g, '\\$1')}"`;
+}
+
+function linuxAutostartExec() {
+  if (app.isPackaged) return quoteDesktopExecPath(ownExePath());
+  return `${quoteDesktopExecPath(ownExePath())} ${quoteDesktopExecPath(app.getAppPath())}`;
+}
+
+function applyLinuxAutostart(cfg) {
+  const file = linuxAutostartFile();
+  try {
+    if (!cfg.launchOnStartup) {
+      fs.rmSync(file, { force: true });
+      return;
+    }
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, [
+      '[Desktop Entry]',
+      'Type=Application',
+      'Name=Cove Nexus',
+      'Comment=Launch Cove Nexus on login',
+      `Exec=${linuxAutostartExec()}`,
+      'Terminal=false',
+      'X-GNOME-Autostart-enabled=true',
+      '',
+    ].join('\n'), 'utf8');
+  } catch (err) {
+    console.error('[cove-loginitem] Linux autostart failed:', err?.message || err);
+  }
+}
+
 // Login item (launch on startup). Electron handles this natively on
-// Windows and macOS; on Linux it's a noop — systemd user units or an
-// autostart .desktop file would be needed, and we don't write either.
+// Windows and macOS; Linux uses the XDG autostart .desktop convention.
 function applyLoginItem(cfg) {
-  if (process.platform === 'linux') return;
+  if (process.platform === 'linux') {
+    applyLinuxAutostart(cfg);
+    return;
+  }
   try {
     app.setLoginItemSettings({
       openAtLogin: !!cfg.launchOnStartup,

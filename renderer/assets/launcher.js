@@ -1035,10 +1035,9 @@
       if (prefSM)   prefSM.checked   = !!cfg.startMinimized;
       if (prefLOS)  prefLOS.checked  = !!cfg.launchOnStartup;
       if (prefCAL)  prefCAL.checked  = !!cfg.closeAfterLaunch;
-      // Linux has no native login-item — grey the checkbox and explain.
       if (prefLOS && cfg.platform === 'linux') {
-        prefLOS.disabled = true;
-        if (prefNote) prefNote.textContent = '— Linux: add Cove Nexus to your desktop environment\'s autostart manually.';
+        prefLOS.disabled = false;
+        if (prefNote) prefNote.textContent = '— creates an XDG autostart entry when enabled.';
       }
       renderRateLimitBanner();
     } catch {}
