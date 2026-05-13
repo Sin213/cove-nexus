@@ -836,6 +836,29 @@
   .foxy-pill.exited     { background: var(--surface-2); border-color: var(--border); color: var(--text-faint); }
   .foxy-pill.failed     { background: color-mix(in srgb, #ef4444 10%, transparent); border-color: color-mix(in srgb, #ef4444 25%, transparent); color: #ef4444; }
 
+  .foxy-pill.proto-idle       { background: color-mix(in srgb, #94a3b8 10%, transparent); border-color: color-mix(in srgb, #94a3b8 25%, transparent); color: #94a3b8; }
+  .foxy-pill.proto-busy       { background: color-mix(in srgb, #f59e0b 10%, transparent); border-color: color-mix(in srgb, #f59e0b 25%, transparent); color: #f59e0b; }
+  .foxy-pill.proto-processing { background: color-mix(in srgb, #f59e0b 10%, transparent); border-color: color-mix(in srgb, #f59e0b 25%, transparent); color: #f59e0b; }
+  .foxy-pill.proto-error      { background: color-mix(in srgb, #ef4444 10%, transparent); border-color: color-mix(in srgb, #ef4444 25%, transparent); color: #ef4444; }
+  .foxy-pill.proto-closing    { background: var(--surface-2); border-color: var(--border); color: var(--text-faint); }
+
+  .foxy-proto-block { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+  .foxy-proto-state { font-size: 0.75rem; color: var(--text-faint); padding-left: 2px; }
+  .foxy-proto-doc   { font-size: 0.7rem; color: var(--text-faint); padding-left: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+  .foxy-proto-progress {
+    position: relative; height: 4px; background: var(--surface-2);
+    border-radius: 2px; overflow: hidden; margin-top: 4px;
+  }
+  .foxy-proto-progress-bar {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    background: var(--accent); border-radius: 2px; transition: width 0.3s ease;
+  }
+  .foxy-proto-progress-label {
+    display: block; font-size: 0.7rem; color: var(--text-faint);
+    margin-top: 2px; padding-left: 2px;
+  }
+
   .foxy-session-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
   .foxy-session-note {
     font-size: 0.75rem; color: var(--text-faint);

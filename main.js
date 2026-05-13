@@ -5,6 +5,8 @@ const fsp = require('node:fs/promises');
 const { spawn, execFileSync } = require('node:child_process');
 const os = require('node:os');
 const https = require('node:https');
+const net = require('node:net');
+const crypto = require('node:crypto');
 
 const APP_ID = 'cove-nexus';
 const GITHUB_OWNER = 'Sin213';
@@ -250,6 +252,7 @@ function applyLoginItem(cfg) {
 }
 
 app.whenReady().then(() => {
+  cleanupStaleProtocolSockets(); // best-effort, non-blocking
   migrateLegacyInstalls();
   migrateRenamedSlugs();
   ensureProgramsRoot();
@@ -265,6 +268,12 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', () => { app.isQuitting = true; });
+
+app.on('before-quit', () => {
+  for (const [slug] of socketServers) {
+    cleanupSocketServer(slug); // async, best-effort
+  }
+});
 
 // Windows Portable builds can't auto-update (electron-updater has no
 // portable target support), so we detect that case and fall through to
@@ -927,7 +936,6 @@ async function installOrUpdate(slug, { force = false, tag: explicitTag } = {}) {
 }
 
 function sha256File(filePath) {
-  const crypto = require('node:crypto');
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
     const stream = fs.createReadStream(filePath);
@@ -936,6 +944,287 @@ function sha256File(filePath) {
     stream.on('end', () => resolve(hash.digest('hex')));
   });
 }
+
+// ---------- foxy v4 protocol ----------
+
+const SUPPORTED_PROTOCOL_VERSION = 1;
+const MAX_PROTO_LINE = 4096;
+
+function slugToDisplayName(slug) {
+  return slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+function truncate(s, maxLen) {
+  if (typeof s !== 'string') return '';
+  return s.length <= maxLen ? s : s.slice(0, maxLen);
+}
+
+function clampPercent(n) {
+  const v = Math.round(Number(n));
+  return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 0;
+}
+
+function buildNexusEnv(slug, runId, appName, socketPath) {
+  const env = {
+    COVE_NEXUS: '1',
+    COVE_NEXUS_PROTOCOL_VERSION: String(SUPPORTED_PROTOCOL_VERSION),
+    COVE_NEXUS_TOOL_SLUG: slug,
+    COVE_NEXUS_RUN_ID: runId,
+    COVE_NEXUS_APP_NAME: appName,
+  };
+  if (socketPath) env.COVE_NEXUS_SOCKET = socketPath;
+  return env;
+}
+
+const socketServers = new Map(); // slug → { server, sockPath, sockDir, xdgBased }
+const notificationRateLimits = new Map(); // slug → lastNotifTimestamp (ms)
+
+async function createSocketDir() {
+  const xdgDir = process.env.XDG_RUNTIME_DIR;
+  if (xdgDir) {
+    try {
+      const dir = path.join(xdgDir, 'cove-nexus');
+      await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+      // Verify the existing-or-newly-created directory is actually private.
+      // mkdir with { recursive: true } silently ignores the mode if the dir
+      // already exists, so we must stat and check rather than trust the call.
+      const st = await fsp.stat(dir);
+      if (!st.isDirectory()) throw new Error('not a directory');
+      if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
+        throw new Error('not owned by current user');
+      }
+      if ((st.mode & 0o077) !== 0) throw new Error('directory is not private');
+      return { dir, xdgBased: true };
+    } catch { /* fall through to private mkdtemp */ }
+  }
+  const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'cove-nexus-'));
+  try { await fsp.chmod(tmp, 0o700); } catch { /* best effort */ }
+  return { dir: tmp, xdgBased: false };
+}
+
+async function cleanupSocketServer(slug) {
+  const entry = socketServers.get(slug);
+  if (!entry) return;
+  socketServers.delete(slug);
+  const { server, sockPath, sockDir, xdgBased } = entry;
+  try { server.close(); } catch { /* ignore */ }
+  try { await fsp.unlink(sockPath); } catch { /* ignore */ }
+  if (!xdgBased) {
+    try { await fsp.rmdir(sockDir); } catch { /* ignore */ }
+  }
+}
+
+function listenOnSocket(server, sockPath) {
+  return new Promise((resolve, reject) => {
+    let retried = false;
+    server.once('error', async (err) => {
+      if (err.code === 'EADDRINUSE' && !retried) {
+        retried = true;
+        try { await fsp.unlink(sockPath); } catch { /* ignore */ }
+        server.once('error', reject);
+        server.listen(sockPath, resolve);
+      } else {
+        reject(err);
+      }
+    });
+    server.listen(sockPath, resolve);
+  });
+}
+
+function processProtocolLine(slug, rawLine) {
+  let msg;
+  try {
+    msg = JSON.parse(rawLine);
+  } catch {
+    return;
+  }
+
+  if (!msg || typeof msg !== 'object') return;
+  if (!msg.type || !msg.runId || msg.protocolVersion === undefined) return;
+  if (typeof msg.ts !== 'string' && typeof msg.ts !== 'number') return;
+
+  const entry = processRegistry.get(slug);
+  if (!entry || !['launching', 'running'].includes(entry.status)) return;
+  if (msg.runId !== entry.runId) return;
+
+  if (typeof msg.protocolVersion !== 'number' || msg.protocolVersion > SUPPORTED_PROTOCOL_VERSION) return;
+
+  const known = ['app_ready', 'status_update', 'active_document', 'progress_update', 'notification', 'app_exiting'];
+  if (!known.includes(msg.type)) return;
+
+  handleProtocolMessage(slug, msg);
+}
+
+function handleSocketConnection(slug, socket) {
+  // Buffer raw bytes so size enforcement is against UTF-8 byte length, not
+  // JS string code units. The spec's 4096-byte limit is a byte count.
+  let buf = Buffer.alloc(0);
+  const NL = 0x0a; // newline byte
+  socket.on('data', (chunk) => {
+    buf = Buffer.concat([buf, chunk]);
+    // Process all complete lines first, enforcing per-line byte size.
+    let nl;
+    while ((nl = buf.indexOf(NL)) !== -1) {
+      const rawBytes = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      if (rawBytes.length > MAX_PROTO_LINE) continue; // line too long in bytes → drop silently
+      const line = rawBytes.toString('utf8').trim();
+      if (line) processProtocolLine(slug, line);
+    }
+    // After complete lines are consumed, guard the remaining partial line by byte length.
+    if (buf.length > MAX_PROTO_LINE) {
+      console.warn(`[cove-proto] oversized partial line from ${slug}, dropping connection`);
+      socket.destroy();
+      buf = Buffer.alloc(0);
+    }
+  });
+  socket.on('error', () => { /* connection errors are normal */ });
+}
+
+async function createSocketServer(slug, runId) {
+  if (process.platform !== 'linux') return null;
+
+  let dir, xdgBased;
+  try {
+    ({ dir, xdgBased } = await createSocketDir());
+  } catch {
+    return null;
+  }
+
+  const sockPath = path.join(dir, `${runId}.sock`);
+  const server = net.createServer((socket) => handleSocketConnection(slug, socket));
+
+  try {
+    await listenOnSocket(server, sockPath);
+  } catch (err) {
+    console.warn(`[cove-proto] socket listen failed for ${slug}:`, err?.message);
+    try { server.close(); } catch { /* ignore */ }
+    if (!xdgBased) {
+      try { await fsp.rmdir(dir); } catch { /* ignore */ }
+    }
+    return null;
+  }
+
+  socketServers.set(slug, { server, sockPath, sockDir: dir, xdgBased });
+  return sockPath;
+}
+
+async function cleanupStaleProtocolSockets() {
+  if (process.platform !== 'linux') return;
+  const xdgDir = process.env.XDG_RUNTIME_DIR;
+  if (!xdgDir) return;
+  const dir = path.join(xdgDir, 'cove-nexus');
+  // Snapshot time before scanning. Files touched at or after this moment
+  // are either freshly created by a concurrent launch or actively in use —
+  // skip them regardless of whether they appear in socketServers yet.
+  const cleanupStart = Date.now();
+  try {
+    const entries = await fsp.readdir(dir, { withFileTypes: true });
+    for (const e of entries) {
+      if (!e.isSocket() && !e.name.endsWith('.sock')) continue;
+      const sockPath = path.join(dir, e.name);
+      // Never unlink a socket that is currently registered (active launch).
+      if ([...socketServers.values()].some(s => s.sockPath === sockPath)) continue;
+      try {
+        const st = await fsp.stat(sockPath);
+        // Skip files created or modified concurrently with this cleanup pass.
+        if (st.mtimeMs >= cleanupStart) continue;
+        await fsp.unlink(sockPath);
+      } catch { /* ignore — file may have been cleaned up by owner */ }
+    }
+  } catch { /* ignore — dir may not exist */ }
+}
+
+function handleProtocolMessage(slug, msg) {
+  const entry = processRegistry.get(slug);
+  if (!entry) return;
+
+  const proto = entry.protocol ? { ...entry.protocol } : {
+    connected: false,
+    status: null,
+    statusLabel: null,
+    activePath: null,
+    projectLabel: null,
+    progress: null,
+    progressLabel: null,
+    lifecycle: null,
+    notification: null,
+  };
+
+  proto.connected = true;
+
+  switch (msg.type) {
+    case 'app_ready':
+      proto.status = 'idle';
+      break;
+
+    case 'status_update': {
+      const validStatuses = ['idle', 'busy', 'processing', 'error'];
+      if (!validStatuses.includes(msg.status)) return;
+      proto.status = msg.status;
+      proto.statusLabel = msg.label != null ? truncate(String(msg.label), 80) : null;
+      break;
+    }
+
+    case 'active_document':
+      proto.activePath = msg.path != null ? truncate(String(msg.path), 260) : null;
+      proto.projectLabel = msg.projectLabel != null ? truncate(String(msg.projectLabel), 60) : null;
+      break;
+
+    case 'progress_update': {
+      if (msg.percent === undefined || msg.percent === null) return;
+      proto.progress = clampPercent(msg.percent);
+      proto.progressLabel = msg.label != null ? truncate(String(msg.label), 80) : null;
+      if (proto.progress === 100) {
+        setTimeout(() => {
+          const e2 = processRegistry.get(slug);
+          if (!e2 || !e2.protocol) return;
+          if (e2.protocol.progress !== 100) return;
+          processRegistry.set(slug, {
+            ...e2,
+            protocol: { ...e2.protocol, progress: null, progressLabel: null },
+            processUpdatedAt: Date.now(),
+          });
+          broadcastProcessUpdate(slug, e2.status);
+        }, 2000);
+      }
+      break;
+    }
+
+    case 'notification': {
+      const validLevels = ['info', 'success', 'warning', 'error'];
+      if (!validLevels.includes(msg.level)) return;
+      if (!msg.title || typeof msg.title !== 'string') return;
+      const now = Date.now();
+      const lastTs = notificationRateLimits.get(slug) ?? 0;
+      if (now - lastTs < 5000) break;
+      notificationRateLimits.set(slug, now);
+      proto.notification = {
+        title: truncate(String(msg.title), 60),
+        body: msg.body != null ? truncate(String(msg.body), 160) : null,
+        level: msg.level,
+        ts: msg.ts,
+      };
+      break;
+    }
+
+    case 'app_exiting':
+      proto.lifecycle = 'closing';
+      break;
+
+    default:
+      return;
+  }
+
+  processRegistry.set(slug, {
+    ...entry,
+    protocol: proto,
+    processUpdatedAt: Date.now(),
+  });
+  broadcastProcessUpdate(slug, entry.status);
+}
+
+// ---------- end foxy v4 protocol ----------
 
 function planFromPath(absPath) {
   if (/\.AppImage$/i.test(absPath)) return { cmd: absPath, args: [], kind: 'appimage' };
@@ -1272,6 +1561,7 @@ function serializeEntry(slug) {
     signal: e.signal ?? null,
     lastError: e.lastError ?? null,
     processUpdatedAt: e.processUpdatedAt,
+    protocol: e.protocol ?? null,
   };
 }
 
@@ -1339,13 +1629,20 @@ ipcMain.handle('cove:launch', async (_e, slug) => {
 
   // Mark launching immediately — before spawn — so any concurrent IPC call
   // hits the nonce guard above.
+  const runId = crypto.randomUUID();
   const now = Date.now();
   processRegistry.set(slug, {
     slug, child: null, pid: null, status: 'launching',
     startedAt: now, exitedAt: null, exitCode: null,
     signal: null, lastError: null, processUpdatedAt: now,
+    runId, protocol: null,
   });
   broadcastProcessUpdate(slug, null);
+
+  // Create socket server before spawn (Linux only; null on other platforms or failure)
+  const appName = slugToDisplayName(slug);
+  const sockPath = await createSocketServer(slug, runId);
+  const nexusEnv = buildNexusEnv(slug, runId, appName, sockPath);
 
   const plan = planFromPath(info.path);
   try {
@@ -1353,7 +1650,7 @@ ipcMain.handle('cove:launch', async (_e, slug) => {
       cwd: path.dirname(info.path),
       detached: true,
       stdio: 'ignore',
-      env: buildLaunchEnv(),
+      env: { ...buildLaunchEnv(), ...nexusEnv },
     });
 
     // Store child ref and capture pid immediately so fast-exiting processes
@@ -1377,6 +1674,7 @@ ipcMain.handle('cove:launch', async (_e, slug) => {
         processUpdatedAt: Date.now(),
       });
       broadcastProcessUpdate(slug, prevStatus);
+      cleanupSocketServer(slug); // async, best-effort
     });
 
     // Unref after listeners are attached so child outlives Nexus but
@@ -1401,6 +1699,7 @@ ipcMain.handle('cove:launch', async (_e, slug) => {
           processUpdatedAt: Date.now(),
         });
         broadcastProcessUpdate(slug, prevStatus);
+        cleanupSocketServer(slug); // async, best-effort
         resolve({ ok: false, error: String(err?.message || err) });
       });
 
@@ -1436,6 +1735,7 @@ ipcMain.handle('cove:launch', async (_e, slug) => {
       processUpdatedAt: Date.now(),
     });
     broadcastProcessUpdate(slug, prevStatus);
+    cleanupSocketServer(slug); // async, best-effort
     return { ok: false, error: String(err?.message || err) };
   }
 });

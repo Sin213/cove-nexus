@@ -35,6 +35,7 @@
     tabs: [],
     activeTabId: 'home',
     processes: {},
+    lastNotifTs: {},
   };
 
   function iconFor(name) {
@@ -111,6 +112,48 @@
         closeBtn +
         `</span>`;
     }).join('');
+  }
+
+  function buildProtocolHtml(proto) {
+    if (!proto) return '';
+    const parts = [];
+
+    const lifecycle = proto.lifecycle;
+    const status = proto.status;
+    if (lifecycle === 'closing') {
+      parts.push(`<span class="foxy-pill proto-closing">Closing…</span>`);
+    } else if (status) {
+      const label = status === 'idle' ? 'Idle'
+        : status === 'busy' ? 'Busy'
+        : status === 'processing' ? 'Processing'
+        : status === 'error' ? 'Error'
+        : '';
+      if (label) {
+        parts.push(`<span class="foxy-pill proto-${escapeAttr(status)}">${label}</span>`);
+      }
+    }
+
+    if (proto.statusLabel) {
+      parts.push(`<div class="foxy-proto-state">${escapeAttr(proto.statusLabel)}</div>`);
+    }
+
+    const docLine = proto.projectLabel || proto.activePath;
+    if (docLine) {
+      parts.push(`<div class="foxy-proto-doc">${escapeAttr(docLine)}</div>`);
+    }
+
+    if (proto.progress != null) {
+      const pct = proto.progress;
+      const pLabel = proto.progressLabel ? escapeAttr(proto.progressLabel) : '';
+      parts.push(
+        `<div class="foxy-proto-progress">` +
+        `<div class="foxy-proto-progress-bar" style="width:${pct}%"></div>` +
+        `</div>` +
+        `<span class="foxy-proto-progress-label">${pLabel ? pLabel + ' — ' : ''}${pct}%</span>`
+      );
+    }
+
+    return parts.length ? `<div class="foxy-proto-block">${parts.join('')}</div>` : '';
   }
 
   function renderToolSession() {
@@ -194,6 +237,7 @@
         ${notesUrl ? `<button class="btn btn-ghost" data-action="notes" data-url="${notesUrlAttr}">Release notes</button>` : ''}
       </div>
       <p class="foxy-session-note">The app runs as a separate window outside Cove Nexus. Switch to it in your OS taskbar to use it.</p>
+      ${buildProtocolHtml(state.processes[tab.slug]?.protocol ?? null)}
     `;
     session.hidden = false;
     mainEl.classList.add('tab-tool');
@@ -1564,6 +1608,18 @@
       coveAPI.onProcessUpdate(({ slug, state: s } = {}) => {
         if (slug && s && typeof s === 'object') {
           state.processes[slug] = s;
+
+          const notif = s?.protocol?.notification;
+          if (notif && notif.ts && notif.ts !== state.lastNotifTs[slug]) {
+            state.lastNotifTs[slug] = notif.ts;
+            const kind = notif.level === 'error' ? 'error'
+              : notif.level === 'warning' ? 'warn'
+              : notif.level === 'success' ? 'success'
+              : 'info';
+            const msg = notif.body ? `${notif.title}: ${notif.body}` : notif.title;
+            toast(msg, kind);
+          }
+
           render();
           renderToolSession();
         }
