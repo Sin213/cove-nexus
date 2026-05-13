@@ -1148,13 +1148,24 @@
   // Merge repos from github.com/Sin213 matching cove-* into window.PROGRAMS.
   // Static entries in programs.js win for icon/category; new repos get defaults.
   const DEFAULT_ICON = 'upscale'; // fallback until you add it to programs.js
+
+  // Persist which discovered slugs we've seen so we only toast on genuinely new ones.
+  const SEEN_REPO_SLUGS_KEY = 'cove-seen-repo-slugs';
+  function getSeenRepoSlugs() {
+    try { return new Set(JSON.parse(localStorage.getItem(SEEN_REPO_SLUGS_KEY) || '[]')); } catch { return new Set(); }
+  }
+  function saveSeenRepoSlugs(set) {
+    try { localStorage.setItem(SEEN_REPO_SLUGS_KEY, JSON.stringify([...set])); } catch {}
+  }
+
   async function discoverAndMerge({ force = false } = {}) {
     if (!IS_DESKTOP) return;
     try {
       const res = await coveAPI.discover({ force });
       if (!res.ok) { toast(`Discovery failed: ${res.error}`, 'error'); return; }
       const bySlug = new Map(window.PROGRAMS.map(p => [p.slug, p]));
-      let added = 0;
+      const seenSlugs = getSeenRepoSlugs();
+      let genuinelyNew = 0;
       for (const r of res.repos) {
         const existing = bySlug.get(r.slug);
         if (existing) {
@@ -1177,10 +1188,16 @@
             discovered: true,
           });
           bySlug.set(r.slug, window.PROGRAMS[window.PROGRAMS.length - 1]);
-          added++;
+          if (!seenSlugs.has(r.slug)) {
+            genuinelyNew++;
+            seenSlugs.add(r.slug);
+          }
         }
       }
-      if (added > 0 && !res.cached) toast(`Found ${added} new repo${added === 1 ? '' : 's'} on github.com/Sin213`);
+      if (genuinelyNew > 0) {
+        saveSeenRepoSlugs(seenSlugs);
+        if (!res.cached) toast(`Found ${genuinelyNew} new repo${genuinelyNew === 1 ? '' : 's'} on github.com/Sin213`);
+      }
       render();
     } catch (e) {
       toast(`Discovery failed: ${e.message}`, 'error');
