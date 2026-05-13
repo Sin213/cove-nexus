@@ -248,6 +248,11 @@
   .sidebar-footer .who { display: flex; flex-direction: column; line-height: 1.2; }
   .sidebar-footer .who small { color: var(--text-faint); font-size: 0.65625rem; }
 
+  /* Sidebar collapse button */
+  .sidebar-collapse { margin-top: auto; align-self: flex-start; all: unset; cursor: pointer; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 7px; color: var(--text-faint); transition: color 100ms, background 100ms; }
+  .sidebar-collapse:hover { color: var(--text); background: var(--surface); }
+  .sidebar-collapse svg { width: 16px; height: 16px; display: block; }
+
   /* Main — scrolls internally so the titlebar stays pinned. */
   .main { padding: 28px 32px 60px; min-width: 0; min-height: 0; overflow-y: auto; height: 100%; }
 
@@ -648,6 +653,18 @@
   ::-webkit-scrollbar-thumb { background: var(--hover-1); border-radius: 10px; border: 2px solid transparent; background-clip: padding-box; }
   ::-webkit-scrollbar-thumb:hover { background: var(--hover-2); background-clip: padding-box; border: 2px solid transparent; }
 
+  /* Sidebar hide/show */
+  .layout.sidebar-hidden { grid-template-columns: 1fr; }
+  .layout.sidebar-hidden .sidebar { display: none; }
+  .sidebar-show {
+    all: unset; cursor: pointer; width: 28px; height: 28px;
+    display: grid; place-items: center; border-radius: 7px;
+    color: var(--text-faint); transition: color 100ms, background 100ms;
+  }
+  .sidebar-show:hover { color: var(--text); background: var(--surface); }
+  .sidebar-show svg { width: 16px; height: 16px; display: block; }
+  #sidebar-show-btn[hidden] { display: none; }
+
   @media (max-width: 900px) {
     .layout { grid-template-columns: 1fr; }
     .sidebar { display: none; }
@@ -882,6 +899,22 @@
   }
   @keyframes foxy-spin { to { transform: rotate(360deg); } }
   .foxy-tabweb-hosted { color: var(--text-faint); }
+
+  /* Tab-web active layout: hosted view fills remaining space below session controls */
+  /* Security boundary: padding zeroed so #tab-web-host aligns exactly with
+     SIDEBAR_W_EXPANDED/TITLEBAR+FOXY+SESSION_CONTROLS constants in main.js.
+     Do NOT remove — part of the native-view security boundary. */
+  main.main.tab-tool.tab-web-active { display: flex; flex-direction: column; overflow: hidden; padding: 0; }
+  /* Remove negative bleed — .main no longer has 32px horizontal padding in this mode */
+  main.main.tab-tool.tab-web-active > #foxy-tabs { margin: 0; }
+  main.main.tab-tool.tab-web-active > #foxy-session { flex: 0 0 200px; min-height: 0; overflow-y: auto; padding-bottom: 0; }
+  /* #tab-web-host is a persistent sibling of #foxy-session; hidden by default */
+  #tab-web-host { display: none; border-radius: 8px; overflow: hidden; }
+  main.main.tab-tool.tab-web-active > #tab-web-host { display: block; flex: 1; min-height: 200px; }
+  /* Force full-bleed regardless of data-chrome setting when hosted view is active.
+     Security boundary: chrome-wrap/chrome padding would offset the native view from its trusted region. */
+  body:has(main.main.tab-web-active) .chrome-wrap { padding: 0; }
+  body:has(main.main.tab-web-active) .chrome { max-width: none; margin: 0; border: none; border-radius: 0; box-shadow: none; }
 </style>
 </head>
 <body data-chrome="none" data-density="default">
@@ -890,6 +923,9 @@
   <div class="chrome">
 
     <div class="titlebar">
+      <button id="sidebar-show-btn" class="sidebar-show" hidden aria-label="Show sidebar" title="Show sidebar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
       <div class="spacer"></div>
       <button id="btn-theme" class="icon-btn" aria-label="Toggle theme" title="Toggle light/dark">
         <svg class="theme-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
@@ -959,6 +995,9 @@
         </div>
 
 
+        <button id="sidebar-collapse-btn" class="sidebar-collapse" title="Hide sidebar" aria-label="Hide sidebar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+        </button>
       </aside>
 
       <!-- Main -->
@@ -1033,6 +1072,7 @@
         <div class="grid" id="grid"></div>
 
         <section id="foxy-session" hidden></section>
+        <div id="tab-web-host" hidden></div>
       </main>
     </div>
   </div>

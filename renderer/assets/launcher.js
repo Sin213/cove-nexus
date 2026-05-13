@@ -36,6 +36,8 @@
     activeTabId: 'home',
     processes: {},
     lastNotifTs: {},
+    activeHostedSlug: null,
+    sidebarHidden: false,
   };
 
   function iconFor(name) {
@@ -92,6 +94,41 @@
       coveAPI.closeTabWeb(id).catch(() => {});
     }
   }
+
+  // ---- Tab-web bounds management ----
+  let _boundsRaf = null;
+  let _hostedRO = null;
+
+  function sendHostedBounds(slug) {
+    const hostEl = document.getElementById('tab-web-host');
+    if (!hostEl) return;
+    const r = hostEl.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return;
+    coveAPI.showTabWebView(slug, { x: r.x, y: r.y, width: r.width, height: r.height }).catch(() => {});
+  }
+
+  function scheduleBoundsUpdate(slug) {
+    if (_boundsRaf) cancelAnimationFrame(_boundsRaf);
+    _boundsRaf = requestAnimationFrame(() => {
+      _boundsRaf = null;
+      sendHostedBounds(slug);
+    });
+  }
+
+  function attachHostedRO(slug) {
+    detachHostedRO();
+    const hostEl = document.getElementById('tab-web-host');
+    if (!hostEl) return;
+    _hostedRO = new ResizeObserver(() => scheduleBoundsUpdate(slug));
+    _hostedRO.observe(hostEl);
+    sendHostedBounds(slug);
+  }
+
+  function detachHostedRO() {
+    if (_hostedRO) { _hostedRO.disconnect(); _hostedRO = null; }
+    if (_boundsRaf) { cancelAnimationFrame(_boundsRaf); _boundsRaf = null; }
+  }
+  // ---- End bounds management ----
 
   function processStatusFor(slug) {
     return state.processes[slug]?.status ?? 'not_running';
@@ -172,20 +209,38 @@
     const mainEl = document.querySelector('main.main');
     if (!session || !mainEl) return;
     if (!state.foxyMode || state.activeTabId === 'home') {
-      mainEl.classList.remove('tab-tool');
+      mainEl.classList.remove('tab-tool', 'tab-web-active');
       session.hidden = true;
+      document.getElementById('tab-web-host').hidden = true;
+      if (state.activeHostedSlug) {
+        detachHostedRO();
+        coveAPI.hideTabWebView(state.activeHostedSlug).catch(() => {});
+        state.activeHostedSlug = null;
+      }
       return;
     }
     const tab = state.tabs.find(t => t.id === state.activeTabId);
     if (!tab) {
-      mainEl.classList.remove('tab-tool');
+      mainEl.classList.remove('tab-tool', 'tab-web-active');
       session.hidden = true;
+      document.getElementById('tab-web-host').hidden = true;
+      if (state.activeHostedSlug) {
+        detachHostedRO();
+        coveAPI.hideTabWebView(state.activeHostedSlug).catch(() => {});
+        state.activeHostedSlug = null;
+      }
       return;
     }
     const prog = window.PROGRAMS.find(p => p.slug === tab.slug);
     if (!prog) {
-      mainEl.classList.remove('tab-tool');
+      mainEl.classList.remove('tab-tool', 'tab-web-active');
       session.hidden = true;
+      document.getElementById('tab-web-host').hidden = true;
+      if (state.activeHostedSlug) {
+        detachHostedRO();
+        coveAPI.hideTabWebView(state.activeHostedSlug).catch(() => {});
+        state.activeHostedSlug = null;
+      }
       return;
     }
     const installed = isInstalled(prog);
@@ -234,9 +289,10 @@
     const tabFallback = proto?.tabFallback ?? false;
     const isTabWeb   = openMode === 'tab-web' && !tabFallback;
 
+    const showHostedView = isTabWeb && !!tabUrl;
     let sessionNote;
-    if (isTabWeb && tabUrl) {
-      sessionNote = `<p class="foxy-session-note foxy-tabweb-hosted">App UI is loading in Nexus…</p>`;
+    if (showHostedView) {
+      sessionNote = '';
     } else if (isTabWeb && isRunning) {
       sessionNote = `<div class="foxy-tabweb-loading"><span class="foxy-tabweb-loading-text">Loading app UI…</span></div>`;
     } else if (openMode === 'tab-web' && tabFallback) {
@@ -269,6 +325,24 @@
     `;
     session.hidden = false;
     mainEl.classList.add('tab-tool');
+    mainEl.classList.toggle('tab-web-active', showHostedView);
+    document.getElementById('tab-web-host').hidden = !showHostedView;
+
+    // Manage hosted WebContentsView attachment
+    const prevSlug = state.activeHostedSlug;
+    if (showHostedView) {
+      if (prevSlug && prevSlug !== slug) {
+        coveAPI.hideTabWebView(prevSlug).catch(() => {});
+      }
+      state.activeHostedSlug = slug;
+      attachHostedRO(slug);
+    } else {
+      if (prevSlug) {
+        detachHostedRO();
+        coveAPI.hideTabWebView(prevSlug).catch(() => {});
+        state.activeHostedSlug = null;
+      }
+    }
   }
 
   // Delegated click handler for foxy tab strip
@@ -319,6 +393,22 @@
     else if (action === 'install') doInstall(prog);
     else if (action === 'update') doUpdate(prog);
     else if (action === 'reveal' && IS_DESKTOP) coveAPI.revealInstall(prog.slug);
+  });
+
+  document.getElementById('sidebar-collapse-btn')?.addEventListener('click', () => {
+    state.sidebarHidden = true;
+    document.querySelector('.layout')?.classList.add('sidebar-hidden');
+    const showBtn = document.getElementById('sidebar-show-btn');
+    if (showBtn) showBtn.hidden = false;
+    if (IS_DESKTOP) coveAPI.setSidebarState('hidden').catch(() => {});
+  });
+
+  document.getElementById('sidebar-show-btn')?.addEventListener('click', () => {
+    state.sidebarHidden = false;
+    document.querySelector('.layout')?.classList.remove('sidebar-hidden');
+    const showBtn = document.getElementById('sidebar-show-btn');
+    if (showBtn) showBtn.hidden = true;
+    if (IS_DESKTOP) coveAPI.setSidebarState('expanded').catch(() => {});
   });
 
   function isInstalled(p) {
