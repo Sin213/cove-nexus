@@ -147,12 +147,21 @@ function createWindow() {
   });
   mainWindow = win;
   win.on('page-title-updated', (e) => e.preventDefault());
-  win.on('closed', () => { if (mainWindow === win) mainWindow = null; });
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null;
+    childViews.clear();
+  });
   win.on('close', (e) => {
     const c = readConfig();
     if (!app.isQuitting && c.minimizeToTray && tray) {
       e.preventDefault();
       win.hide();
+      return;
+    }
+    // Window will be destroyed — detach hosted child views while contentView is still alive.
+    for (const slug of childViews) {
+      const v = hostedViews.get(slug);
+      if (v) try { win.contentView.removeChildView(v); } catch (_) {}
     }
   });
   win.on('maximize', () => win.webContents.send('cove:window:stateChanged', { maximized: true }));
@@ -1242,10 +1251,9 @@ function handleProtocolMessage(slug, msg) {
 
 // ---------- end foxy v4 protocol ----------
 
-// ---------- foxy v5 tab-web scaffold ----------
+// ---------- foxy v5 tab-web host ----------
 // Hosted views are created when a tab-web app sends a valid tab_ready message.
-// Positioning (addChildView + bounds IPC) is deferred to Phase 3 — views are
-// created and loaded here but not yet attached to mainWindow.contentView.
+// Renderer sends bounds via cove:tab-web:show; main attaches via addChildView + setBounds.
 
 function isValidTabUrl(url) {
   let parsed;
@@ -1259,7 +1267,37 @@ function isValidTabUrl(url) {
 }
 
 const hostedViews = new Map();    // slug → WebContentsView
+const childViews  = new Set();    // slugs whose view is currently addChildView'd
 const tabReadyTimers = new Map(); // slug → timeoutId
+// Sidebar layout state — set via cove:tab-web:sidebarState.
+// Only two valid values; invalid input falls back to 'expanded' (safe).
+// Main owns the translation from this enum to fixed pixel geometry.
+// Renderer must not send dimensions — only this narrow enum.
+let sidebarBaseState = 'expanded'; // 'expanded' | 'hidden'
+
+// Chrome layout constants — must match renderer/index.html CSS exactly.
+const TITLEBAR_H         = 36;  // .titlebar { flex: 0 0 36px }
+const FOXY_TABS_H        = 46;  // #foxy-tabs { height: 46px } — always present when tab-web:show fires
+const SIDEBAR_W_EXPANDED = 240; // .layout { grid-template-columns: 240px 1fr }
+const SESSION_CONTROLS_H = 200; // reserved height for #foxy-session; enforced by CSS flex: 0 0 200px + min-height: 0 (security boundary)
+
+function getTrustedTabWebRegion(cw, ch) {
+  // Top: titlebar + Foxy tab strip + session controls reserve.
+  // SESSION_CONTROLS_H is part of the native-view security boundary.
+  // CSS enforces flex: 0 0 200px + min-height: 0 — controls scroll inside,
+  // cannot push the host pane down regardless of content height.
+  const topH = TITLEBAR_H + FOXY_TABS_H + SESSION_CONTROLS_H;
+  // Left: when sidebar is hidden the host pane starts at x=0; otherwise it
+  // must not overlap the sidebar. Main converts the enum to a fixed constant —
+  // no renderer-supplied dimension is trusted.
+  const leftX = sidebarBaseState === 'hidden' ? 0 : SIDEBAR_W_EXPANDED;
+  return {
+    x:      leftX,
+    y:      topH,
+    width:  Math.max(0, cw - leftX),
+    height: Math.max(0, ch - topH),
+  };
+}
 
 function clearTabReadyTimer(slug) {
   const t = tabReadyTimers.get(slug);
@@ -1297,6 +1335,10 @@ function destroyHostedView(slug) {
   const view = hostedViews.get(slug);
   if (!view) return;
   hostedViews.delete(slug);
+  if (childViews.has(slug)) {
+    try { mainWindow?.contentView?.removeChildView(view); } catch (_) {}
+    childViews.delete(slug);
+  }
   try {
     if (!view.webContents.isDestroyed()) view.webContents.close();
   } catch { /* best-effort */ }
@@ -1845,6 +1887,73 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
     clearTabReadyTimer(slug);
     return { ok: false, error: String(err?.message || err) };
   }
+});
+
+ipcMain.handle('cove:tab-web:show', (_e, slug, bounds) => {
+  if (!isValidSlug(slug)) return;
+  const view = hostedViews.get(slug);
+  if (!view || view.webContents.isDestroyed()) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  // Reject before any arithmetic: all four fields must be finite numbers with
+  // positive dimensions. Rejects NaN, Infinity, undefined, null, strings,
+  // objects, and arrays without relying on clamp to mask bad values.
+  if (!bounds ||
+      !Number.isFinite(bounds.x) || !Number.isFinite(bounds.y) ||
+      !Number.isFinite(bounds.width) || !Number.isFinite(bounds.height) ||
+      bounds.width <= 0 || bounds.height <= 0) {
+    // Fail closed: detach any previously attached view before returning.
+    if (childViews.has(slug)) {
+      try { mainWindow.contentView.removeChildView(view); } catch (_) {}
+      childViews.delete(slug);
+    }
+    return;
+  }
+
+  // Compute the main-owned trusted region — the only area where a hosted view
+  // may appear. Excludes titlebar, sidebar, and Foxy tab strip.
+  const [cw, ch] = mainWindow.getContentSize();
+  const trusted = getTrustedTabWebRegion(cw, ch);
+
+  // Treat renderer-supplied bounds as untrusted measurement hints.
+  // Intersect with the trusted region; renderer may only shrink or align
+  // within it, never expand outside it.
+  const rx = Math.round(bounds.x);
+  const ry = Math.round(bounds.y);
+  const x      = Math.max(rx, trusted.x);
+  const y      = Math.max(ry, trusted.y);
+  const width  = Math.min(rx + Math.round(bounds.width),  trusted.x + trusted.width)  - x;
+  const height = Math.min(ry + Math.round(bounds.height), trusted.y + trusted.height) - y;
+
+  // Enforce a minimum 32×32 usable area. A degenerate rectangle or a window
+  // too small to host the view should detach rather than remain invisible.
+  if (width < 32 || height < 32) {
+    if (childViews.has(slug)) {
+      try { mainWindow.contentView.removeChildView(view); } catch (_) {}
+      childViews.delete(slug);
+    }
+    return;
+  }
+
+  if (!childViews.has(slug)) {
+    mainWindow.contentView.addChildView(view);
+    childViews.add(slug);
+  }
+  view.setBounds({ x, y, width, height });
+});
+
+ipcMain.handle('cove:tab-web:hide', (_e, slug) => {
+  if (!isValidSlug(slug)) return;
+  const view = hostedViews.get(slug);
+  if (!view || !childViews.has(slug)) return;
+  try { mainWindow?.contentView?.removeChildView(view); } catch (_) {}
+  childViews.delete(slug);
+});
+
+ipcMain.handle('cove:tab-web:sidebarState', (_e, s) => {
+  // Accept only the two known layout states; invalid input falls back to 'expanded'.
+  // Renderer sends the enum only — no dimensions. Main translates to fixed geometry.
+  sidebarBaseState = s === 'hidden' ? 'hidden' : 'expanded';
 });
 
 ipcMain.handle('cove:tab-web:close', (_e, slug) => {
