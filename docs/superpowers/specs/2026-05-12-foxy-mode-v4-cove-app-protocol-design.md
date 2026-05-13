@@ -77,12 +77,14 @@ Nexus injects the following environment variables into the spawned process via `
 | `COVE_NEXUS_RUN_ID` | UUID v4 | Unique per launch. Used to identify the socket and validate messages. |
 | `COVE_NEXUS_APP_NAME` | e.g. `Cove Video Editor` | Display name for the app. |
 | `COVE_NEXUS_SOCKET` | Full socket path | Only present when Foxy Mode is enabled and the socket was successfully created. |
+| `COVE_NEXUS_OPEN_MODE` | `tab-web` | Only present when Nexus is requesting tab-web mode. Absence means external/default behavior. |
 
 **Checking for protocol availability:**
 
 - `COVE_NEXUS=1` means "launched by Cove Nexus." It may exist without `COVE_NEXUS_SOCKET`.
 - `COVE_NEXUS_SOCKET` is the signal that the protocol socket is available. Apps must check for this variable before attempting any socket I/O.
 - If `COVE_NEXUS_SOCKET` is absent (Foxy Mode off, socket creation failed, or non-Linux platform), the app should skip all protocol code silently.
+- `COVE_NEXUS_OPEN_MODE=tab-web` signals that Nexus expects the app to run in tab-web mode (bind a local HTTP server, send `tab_ready`). If absent, the app should use its normal standalone/external UI behavior.
 
 **Recommended app-side guard (pseudocode):**
 

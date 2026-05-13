@@ -979,7 +979,7 @@ function clampPercent(n) {
   return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 0;
 }
 
-function buildNexusEnv(slug, runId, appName, socketPath) {
+function buildNexusEnv(slug, runId, appName, socketPath, openMode) {
   const env = {
     COVE_NEXUS: '1',
     COVE_NEXUS_PROTOCOL_VERSION: String(SUPPORTED_PROTOCOL_VERSION),
@@ -988,6 +988,7 @@ function buildNexusEnv(slug, runId, appName, socketPath) {
     COVE_NEXUS_APP_NAME: appName,
   };
   if (socketPath) env.COVE_NEXUS_SOCKET = socketPath;
+  if (openMode === 'tab-web') env.COVE_NEXUS_OPEN_MODE = 'tab-web';
   return env;
 }
 
@@ -1857,7 +1858,7 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
   // Create socket server before spawn (Linux only; null on other platforms or failure)
   const appName = slugToDisplayName(slug);
   const sockPath = await createSocketServer(slug, runId);
-  const nexusEnv = buildNexusEnv(slug, runId, appName, sockPath);
+  const nexusEnv = buildNexusEnv(slug, runId, appName, sockPath, openMode);
 
   const plan = planFromPath(info.path);
   try {
