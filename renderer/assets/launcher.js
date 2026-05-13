@@ -1235,7 +1235,7 @@
           prog.latestTag = row.latestTag || '';
           prog.latestUnknown = !!row.latestUnknown;
           prog.source = row.source || '';
-          if (row.version) prog.version = row.version.replace(/^v/, '');
+          prog.version = row.version ? row.version.replace(/^v/, '') : '';
         }
       }
       renderRateLimitBanner();
