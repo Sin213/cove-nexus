@@ -1626,10 +1626,11 @@
       });
     }
     render();
-    // Now the slow path: network-backed scan, discovery, and release-notes.
+    // Slow path: discover first so discovered programs (not in programs.js) are
+    // added to window.PROGRAMS before rescan() tries to set their versions.
+    await discoverAndMerge();
     await rescan();
     render();
-    await discoverAndMerge();
     await fetchAllReleaseNotes();
     render();
   }
