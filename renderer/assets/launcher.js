@@ -595,7 +595,7 @@
     const primaryLabel = document.getElementById('ft-primary-label');
     // Prefer the upstream tag — the featured card showcases what's shipping
     // right now, not whatever the user has installed locally.
-    const displayVer = (prog.latestTag || '').replace(/^v/, '') || prog.version || '';
+    const displayVer = (prog.latestTag || '').replace(/^v/, '');
     if (title) title.textContent = displayVer ? `${prog.name} ${displayVer}` : prog.name;
     if (desc) desc.textContent = prog.desc || '';
     if (version) version.textContent = displayVer ? `v${displayVer}` : '';
