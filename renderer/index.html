@@ -866,6 +866,22 @@
     background: var(--surface-2); border: 1px solid var(--border);
     line-height: 1.5;
   }
+  .foxy-tabweb-loading {
+    padding: 12px 14px; border-radius: 8px;
+    background: var(--surface-2); border: 1px solid var(--border);
+  }
+  .foxy-tabweb-loading-text {
+    font-size: 0.75rem; color: var(--text-faint);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .foxy-tabweb-loading-text::before {
+    content: ''; display: inline-block;
+    width: 10px; height: 10px; border-radius: 50%;
+    border: 2px solid var(--accent); border-top-color: transparent;
+    animation: foxy-spin 0.8s linear infinite;
+  }
+  @keyframes foxy-spin { to { transform: rotate(360deg); } }
+  .foxy-tabweb-hosted { color: var(--text-faint); }
 </style>
 </head>
 <body data-chrome="none" data-density="default">

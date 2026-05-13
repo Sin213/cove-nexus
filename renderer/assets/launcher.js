@@ -51,6 +51,13 @@
       if (!state.tabs.length) state.tabs = [{ id: 'home', kind: 'home', title: 'Home' }];
     } else {
       document.body.removeAttribute('data-foxy');
+      for (const tab of state.tabs) {
+        if (tab.kind !== 'tool') continue;
+        const prog = window.PROGRAMS?.find(p => p.slug === tab.slug);
+        if (prog?.openMode === 'tab-web') {
+          coveAPI.closeTabWeb(tab.id).catch(() => {});
+        }
+      }
       state.tabs = [];
       state.activeTabId = 'home';
       const mainEl = document.querySelector('main.main');
@@ -79,6 +86,10 @@
     if (state.activeTabId === id) {
       const prev = state.tabs[idx - 1] || state.tabs[0];
       state.activeTabId = prev ? prev.id : 'home';
+    }
+    const prog = window.PROGRAMS?.find(p => p.slug === id);
+    if (prog?.openMode === 'tab-web') {
+      coveAPI.closeTabWeb(id).catch(() => {});
     }
   }
 
@@ -217,6 +228,23 @@
     const launchAction = !installed ? 'install' : isRunning ? 'focus' : 'launch';
     const launchDisabled = isLaunching || busy === 'installing';
 
+    const openMode   = prog.openMode || 'external';
+    const proto      = state.processes[tab.slug]?.protocol ?? null;
+    const tabUrl     = proto?.tabUrl ?? null;
+    const tabFallback = proto?.tabFallback ?? false;
+    const isTabWeb   = openMode === 'tab-web' && !tabFallback;
+
+    let sessionNote;
+    if (isTabWeb && tabUrl) {
+      sessionNote = `<p class="foxy-session-note foxy-tabweb-hosted">App UI is loading in Nexus…</p>`;
+    } else if (isTabWeb && isRunning) {
+      sessionNote = `<div class="foxy-tabweb-loading"><span class="foxy-tabweb-loading-text">Loading app UI…</span></div>`;
+    } else if (openMode === 'tab-web' && tabFallback) {
+      sessionNote = `<p class="foxy-session-note">App opened externally — it was unable to load inside Nexus.</p>`;
+    } else {
+      sessionNote = `<p class="foxy-session-note">The app runs as a separate window outside Cove Nexus. Switch to it in your OS taskbar to use it.</p>`;
+    }
+
     session.innerHTML = `
       <div class="foxy-session-header">
         <div class="foxy-session-icon">${icon}</div>
@@ -236,8 +264,8 @@
         <button class="btn btn-ghost" data-action="github" data-url="${githubUrlAttr}">GitHub</button>
         ${notesUrl ? `<button class="btn btn-ghost" data-action="notes" data-url="${notesUrlAttr}">Release notes</button>` : ''}
       </div>
-      <p class="foxy-session-note">The app runs as a separate window outside Cove Nexus. Switch to it in your OS taskbar to use it.</p>
-      ${buildProtocolHtml(state.processes[tab.slug]?.protocol ?? null)}
+      ${sessionNote}
+      ${buildProtocolHtml(proto)}
     `;
     session.hidden = false;
     mainEl.classList.add('tab-tool');
@@ -643,7 +671,7 @@
     render();
     try {
       if (IS_DESKTOP) {
-        const res = await coveAPI.launch(slug);
+        const res = await coveAPI.launch(slug, prog.openMode);
         if (res.alreadyRunning) {
           if (state.foxyMode) ensureTab(prog);
           toast(`${prog.name} is already running.`);

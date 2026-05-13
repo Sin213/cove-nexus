@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage, safeStorage } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, shell, dialog, Tray, Menu, nativeImage, safeStorage } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -272,6 +272,9 @@ app.on('before-quit', () => { app.isQuitting = true; });
 app.on('before-quit', () => {
   for (const [slug] of socketServers) {
     cleanupSocketServer(slug); // async, best-effort
+  }
+  for (const slug of [...hostedViews.keys()]) {
+    destroyHostedView(slug);
   }
 });
 
@@ -1049,7 +1052,7 @@ function processProtocolLine(slug, rawLine) {
 
   if (typeof msg.protocolVersion !== 'number' || msg.protocolVersion > SUPPORTED_PROTOCOL_VERSION) return;
 
-  const known = ['app_ready', 'status_update', 'active_document', 'progress_update', 'notification', 'app_exiting'];
+  const known = ['app_ready', 'status_update', 'active_document', 'progress_update', 'notification', 'app_exiting', 'tab_ready'];
   if (!known.includes(msg.type)) return;
 
   handleProtocolMessage(slug, msg);
@@ -1149,6 +1152,8 @@ function handleProtocolMessage(slug, msg) {
     progressLabel: null,
     lifecycle: null,
     notification: null,
+    tabUrl: null,
+    tabFallback: false,
   };
 
   proto.connected = true;
@@ -1212,6 +1217,17 @@ function handleProtocolMessage(slug, msg) {
       proto.lifecycle = 'closing';
       break;
 
+    case 'tab_ready': {
+      if (typeof msg.url !== 'string') return;
+      if (!isValidTabUrl(msg.url)) return;
+      if (entry.openMode !== 'tab-web') return;
+      if (proto.tabUrl || proto.tabFallback) return; // ignore duplicate or post-fallback/close
+      proto.tabUrl = msg.url;
+      clearTabReadyTimer(slug);
+      createHostedView(slug, msg.url);
+      break;
+    }
+
     default:
       return;
   }
@@ -1225,6 +1241,75 @@ function handleProtocolMessage(slug, msg) {
 }
 
 // ---------- end foxy v4 protocol ----------
+
+// ---------- foxy v5 tab-web scaffold ----------
+// Hosted views are created when a tab-web app sends a valid tab_ready message.
+// Positioning (addChildView + bounds IPC) is deferred to Phase 3 — views are
+// created and loaded here but not yet attached to mainWindow.contentView.
+
+function isValidTabUrl(url) {
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'http:') return false;
+  if (parsed.hostname !== '127.0.0.1') return false;
+  const port = parseInt(parsed.port, 10);
+  if (!port || port < 1024 || port > 65535) return false;
+  if (parsed.username || parsed.password) return false;
+  return true;
+}
+
+const hostedViews = new Map();    // slug → WebContentsView
+const tabReadyTimers = new Map(); // slug → timeoutId
+
+function clearTabReadyTimer(slug) {
+  const t = tabReadyTimers.get(slug);
+  if (t) { clearTimeout(t); tabReadyTimers.delete(slug); }
+}
+
+function createHostedView(slug, url) {
+  destroyHostedView(slug);
+  const allowedOrigin = new URL(url).origin; // e.g. "http://127.0.0.1:12345"
+
+  function guardNav(details) {
+    if (!details.isMainFrame) return;
+    let sameOrigin = false;
+    try { sameOrigin = new URL(details.url).origin === allowedOrigin; } catch { /* deny */ }
+    if (!sameOrigin) details.preventDefault();
+  }
+
+  const view = new WebContentsView({
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+    },
+  });
+  view.webContents.on('will-navigate', guardNav);
+  view.webContents.on('will-redirect', guardNav);
+  view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  hostedViews.set(slug, view);
+  view.webContents.loadURL(url);
+}
+
+function destroyHostedView(slug) {
+  const view = hostedViews.get(slug);
+  if (!view) return;
+  hostedViews.delete(slug);
+  try {
+    if (!view.webContents.isDestroyed()) view.webContents.close();
+  } catch { /* best-effort */ }
+  // Clear stale tabUrl so the renderer knows this view is gone.
+  const e = processRegistry.get(slug);
+  if (e?.protocol?.tabUrl != null) {
+    const proto = { ...e.protocol, tabUrl: null };
+    processRegistry.set(slug, { ...e, protocol: proto, processUpdatedAt: Date.now() });
+    broadcastProcessUpdate(slug, e.status);
+  }
+}
+
+// ---------- end foxy v5 tab-web scaffold ----------
 
 function planFromPath(absPath) {
   if (/\.AppImage$/i.test(absPath)) return { cmd: absPath, args: [], kind: 'appimage' };
@@ -1562,6 +1647,7 @@ function serializeEntry(slug) {
     lastError: e.lastError ?? null,
     processUpdatedAt: e.processUpdatedAt,
     protocol: e.protocol ?? null,
+    openMode: e.openMode ?? 'external',
   };
 }
 
@@ -1610,8 +1696,9 @@ ipcMain.handle('cove:process:focus', (_e, slug) => {
   return { ok: true, focused: false, unsupported: true, reason: 'unsupported-platform' };
 });
 
-ipcMain.handle('cove:launch', async (_e, slug) => {
+ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
   if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
+  const openMode = rawOpenMode === 'tab-web' ? 'tab-web' : 'external';
   if (isLegacyClone(slug)) {
     return { ok: false, error: 'This install is from an older version. Click Update to reinstall as a binary.' };
   }
@@ -1635,7 +1722,7 @@ ipcMain.handle('cove:launch', async (_e, slug) => {
     slug, child: null, pid: null, status: 'launching',
     startedAt: now, exitedAt: null, exitCode: null,
     signal: null, lastError: null, processUpdatedAt: now,
-    runId, protocol: null,
+    runId, protocol: null, openMode,
   });
   broadcastProcessUpdate(slug, null);
 
@@ -1675,7 +1762,23 @@ ipcMain.handle('cove:launch', async (_e, slug) => {
       });
       broadcastProcessUpdate(slug, prevStatus);
       cleanupSocketServer(slug); // async, best-effort
+      destroyHostedView(slug);
+      clearTabReadyTimer(slug);
     });
+
+    // For tab-web apps: if tab_ready never arrives within 10 s, fall back to external mode.
+    if (openMode === 'tab-web') {
+      const tabTimer = setTimeout(() => {
+        tabReadyTimers.delete(slug);
+        const e = processRegistry.get(slug);
+        if (!e || e.runId !== runId || e.protocol?.tabUrl) return;
+        const proto = e.protocol ? { ...e.protocol } : {};
+        proto.tabFallback = true;
+        processRegistry.set(slug, { ...e, protocol: proto, processUpdatedAt: Date.now() });
+        broadcastProcessUpdate(slug, e.status);
+      }, 10000);
+      tabReadyTimers.set(slug, tabTimer);
+    }
 
     // Unref after listeners are attached so child outlives Nexus but
     // exit/error events still reach us while the event loop is running.
@@ -1700,6 +1803,8 @@ ipcMain.handle('cove:launch', async (_e, slug) => {
         });
         broadcastProcessUpdate(slug, prevStatus);
         cleanupSocketServer(slug); // async, best-effort
+        destroyHostedView(slug);
+        clearTabReadyTimer(slug);
         resolve({ ok: false, error: String(err?.message || err) });
       });
 
@@ -1736,8 +1841,29 @@ ipcMain.handle('cove:launch', async (_e, slug) => {
     });
     broadcastProcessUpdate(slug, prevStatus);
     cleanupSocketServer(slug); // async, best-effort
+    destroyHostedView(slug);
+    clearTabReadyTimer(slug);
     return { ok: false, error: String(err?.message || err) };
   }
+});
+
+ipcMain.handle('cove:tab-web:close', (_e, slug) => {
+  if (!isValidSlug(slug)) return;
+  clearTabReadyTimer(slug);
+  // Mark the session closed so any late tab_ready (including socket-race before first message)
+  // is rejected. Initialise protocol from existing state or a safe empty base.
+  const e = processRegistry.get(slug);
+  if (e?.openMode === 'tab-web') {
+    const base = e.protocol ?? {
+      connected: false, status: null, statusLabel: null, activePath: null,
+      projectLabel: null, progress: null, progressLabel: null,
+      lifecycle: null, notification: null,
+    };
+    const proto = { ...base, tabUrl: null, tabFallback: true };
+    processRegistry.set(slug, { ...e, protocol: proto, processUpdatedAt: Date.now() });
+    broadcastProcessUpdate(slug, e.status);
+  }
+  destroyHostedView(slug); // removes view + skips tabUrl broadcast (already null above)
 });
 
 ipcMain.handle('cove:revealInstall', async (_e, slug) => {
