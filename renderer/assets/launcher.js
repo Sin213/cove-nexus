@@ -1732,6 +1732,25 @@
             state.tabs = [{ id: 'home', kind: 'home', title: 'Home' }];
           }
         }
+        // dev-only: inject smoke test entry (never shown in packaged builds)
+        if (!info?.packaged) {
+          categoryLabels['cat-dev'] = 'Developer';
+          if (window.ICONS) window.ICONS['smoke'] = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6"/><path d="M10 3v7l-4 8a1 1 0 0 0 .9 1.5h10.2A1 1 0 0 0 18 18l-4-8V3"/><path d="M7 16h10"/></svg>`;
+          window.PROGRAMS.push({
+            name: 'Nexus tab-web smoke test',
+            slug: 'tab-web-smoke',
+            desc: 'Dev-only harness: proves the tab-web host can render a sandboxed local page inside a Foxy tab.',
+            icon: 'smoke',
+            category: 'cat-dev',
+            lang: 'Internal',
+            version: '0.0.0',
+            updated: '',
+            installed: false,
+            hasUpdate: false,
+            openMode: 'tab-web',
+          });
+          state.installedOverride['tab-web-smoke'] = true;
+        }
       } catch {}
     }
     // Bootstrap process state from main process and subscribe to live updates.

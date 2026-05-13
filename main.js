@@ -285,6 +285,9 @@ app.on('before-quit', () => {
   for (const slug of [...hostedViews.keys()]) {
     destroyHostedView(slug);
   }
+  for (const [slug] of smokeServers) {
+    stopSmokeServer(slug);
+  }
 });
 
 // Windows Portable builds can't auto-update (electron-updater has no
@@ -1269,6 +1272,36 @@ function isValidTabUrl(url) {
 const hostedViews = new Map();    // slug → WebContentsView
 const childViews  = new Set();    // slugs whose view is currently addChildView'd
 const tabReadyTimers = new Map(); // slug → timeoutId
+const smokeServers = new Map();   // slug → http.Server (dev-only, never in packaged builds)
+
+function stopSmokeServer(slug) {
+  const srv = smokeServers.get(slug);
+  if (!srv) return;
+  smokeServers.delete(slug);
+  try { srv.close(); } catch (_) {}
+}
+
+async function startSmokeServer(runId) {
+  const http = require('http');
+  return new Promise((resolve, reject) => {
+    const srv = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>Nexus tab-web smoke test</title>
+<style>body{font-family:system-ui,sans-serif;padding:2rem 3rem;background:#14141f;color:#c9d1d9;max-width:600px}
+h1{color:#58a6ff;margin-bottom:1rem}code{background:#21262d;padding:.15rem .4rem;border-radius:.25rem;font-size:.85em}
+</style></head><body>
+<h1>Nexus tab-web smoke test</h1>
+<p>WebContentsView rendered correctly inside Cove Nexus.</p>
+<p>Run ID: <code>${runId}</code></p>
+<p>Server: <code>127.0.0.1</code> only — dev mode only.</p>
+</body></html>`);
+    });
+    srv.listen(0, '127.0.0.1', () => resolve({ srv, port: srv.address().port }));
+    srv.on('error', reject);
+  });
+}
+
 // Sidebar layout state — set via cove:tab-web:sidebarState.
 // Only two valid values; invalid input falls back to 'expanded' (safe).
 // Main owns the translation from this enum to fixed pixel geometry.
@@ -1745,6 +1778,59 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
     return { ok: false, error: 'This install is from an older version. Click Update to reinstall as a binary.' };
   }
 
+  // dev-only smoke harness — app.isPackaged gate ensures this is never reachable in production
+  if (!app.isPackaged && slug === 'tab-web-smoke') {
+    const existing = processRegistry.get('tab-web-smoke');
+    if (existing && (existing.status === 'launching' || existing.status === 'running')) {
+      return { ok: true, alreadyRunning: true, kind: 'smoke' };
+    }
+    const runId = crypto.randomUUID();
+    const now = Date.now();
+    processRegistry.set('tab-web-smoke', {
+      slug: 'tab-web-smoke', child: null, pid: null,
+      status: 'launching', openMode: 'tab-web', runId,
+      startedAt: now, exitedAt: null, exitCode: null, signal: null,
+      lastError: null, processUpdatedAt: now,
+      protocol: {
+        connected: false, status: null, statusLabel: null,
+        activePath: null, projectLabel: null, progress: null, progressLabel: null,
+        lifecycle: null, notification: null, tabUrl: null, tabFallback: false,
+      },
+    });
+    broadcastProcessUpdate('tab-web-smoke', null);
+    let srv, port;
+    try {
+      ({ srv, port } = await startSmokeServer(runId));
+    } catch (err) {
+      processRegistry.delete('tab-web-smoke');
+      broadcastProcessUpdate('tab-web-smoke', 'launching');
+      return { ok: false, error: `smoke: server start failed: ${err.message}` };
+    }
+    smokeServers.set('tab-web-smoke', srv);
+    const smokeEntry = processRegistry.get('tab-web-smoke');
+    processRegistry.set('tab-web-smoke', { ...smokeEntry, status: 'running', processUpdatedAt: Date.now() });
+    broadcastProcessUpdate('tab-web-smoke', 'launching');
+    const tabTimer = setTimeout(() => {
+      tabReadyTimers.delete('tab-web-smoke');
+      const e2 = processRegistry.get('tab-web-smoke');
+      if (!e2 || e2.runId !== runId || e2.protocol?.tabUrl) return;
+      const proto2 = e2.protocol ? { ...e2.protocol } : {};
+      proto2.tabFallback = true;
+      processRegistry.set('tab-web-smoke', { ...e2, protocol: proto2, processUpdatedAt: Date.now() });
+      broadcastProcessUpdate('tab-web-smoke', e2.status);
+      stopSmokeServer('tab-web-smoke');
+    }, 10000);
+    tabReadyTimers.set('tab-web-smoke', tabTimer);
+    processProtocolLine('tab-web-smoke', JSON.stringify({
+      type: 'app_ready', runId, protocolVersion: 1, ts: Date.now(),
+    }));
+    processProtocolLine('tab-web-smoke', JSON.stringify({
+      type: 'tab_ready', runId, protocolVersion: 1, ts: Date.now(),
+      url: `http://127.0.0.1:${port}/`,
+    }));
+    return { ok: true, alreadyRunning: false, kind: 'smoke' };
+  }
+
   // Nonce guard: prevent duplicate spawns. Fires before any async work so
   // rapid double-clicks are resolved by the registry, not by the busy flag alone.
   const existing = processRegistry.get(slug);
@@ -1973,6 +2059,18 @@ ipcMain.handle('cove:tab-web:close', (_e, slug) => {
     broadcastProcessUpdate(slug, e.status);
   }
   destroyHostedView(slug); // removes view + skips tabUrl broadcast (already null above)
+  // dev-only: stop smoke server and mark exited so re-launch is possible
+  if (!app.isPackaged && slug === 'tab-web-smoke') {
+    stopSmokeServer(slug);
+    const smokeE = processRegistry.get(slug);
+    if (smokeE) {
+      processRegistry.set(slug, {
+        ...smokeE, status: 'exited', exitCode: 0,
+        exitedAt: Date.now(), processUpdatedAt: Date.now(),
+      });
+      broadcastProcessUpdate(slug, smokeE.status);
+    }
+  }
 });
 
 ipcMain.handle('cove:revealInstall', async (_e, slug) => {
