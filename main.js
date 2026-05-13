@@ -984,14 +984,21 @@ function buildLaunchEnv() {
 
 // ---------- scan ----------
 
+function isValidTag(tag) {
+  return typeof tag === 'string' && /^v\d/.test(tag);
+}
+
 async function scanOneInstalled(slug, info) {
   let latestTag = '';
   let notesBody = '';
   let notesUrl = '';
   try {
     const rel = await fetchLatestRelease(slug);
-    latestTag = rel?.tag_name || '';
-    notesUrl = rel?.html_url || '';
+    const rawTag = rel?.tag_name || '';
+    if (isValidTag(rawTag)) {
+      latestTag = rawTag;
+      notesUrl = rel?.html_url || '';
+    }
     // Keep the card-preview small — we trim to first 400 chars here, and the
     // renderer clamps visually to 2 lines. Strip HTML-comment boilerplate
     // that electron-builder-generated notes sometimes contain.
@@ -1002,8 +1009,8 @@ async function scanOneInstalled(slug, info) {
   // Persist the most recent successful latestTag so a transient rate-limit
   // (empty latestTag this tick) doesn't silently hide a previously-detected
   // update. Falls back to the cached value when this scan came up empty.
-  const cachedLatest = info.lastKnownLatestTag || '';
-  if (latestTag && latestTag !== cachedLatest) {
+  const cachedLatest = isValidTag(info.lastKnownLatestTag) ? info.lastKnownLatestTag : '';
+  if (latestTag && latestTag !== (info.lastKnownLatestTag || '')) {
     try {
       const reg = readRegistry();
       if (reg[slug]) {
@@ -1477,7 +1484,7 @@ ipcMain.handle('cove:latestReleases', async (_e, slugs = []) => {
     try {
       const rel = await fetchLatestRelease(slug);
       const tag = rel?.tag_name || '';
-      if (!tag) return;
+      if (!isValidTag(tag)) return;
       const body = (typeof rel?.body === 'string' ? rel.body : '')
         .replace(/<!--[\s\S]*?-->/g, '').trim().slice(0, 400);
       releases[slug] = { tag, body, url: rel?.html_url || '' };

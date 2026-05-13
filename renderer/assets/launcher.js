@@ -367,11 +367,15 @@
       </div>`;
   }
 
+  function isValidReleaseTag(tag) {
+    return typeof tag === 'string' && /^v\d/.test(tag);
+  }
+
   function releaseNotesHtml(p) {
     const n = state.releaseNotes[p.slug];
-    if (!n) return '';
-    const url = n.url || `https://github.com/Sin213/${p.slug}/releases/latest`;
-    const tag = n.tag ? `Latest: <b>${escapeAttr(n.tag)}</b>` : 'Latest';
+    if (!n || !isValidReleaseTag(n.tag)) return '';
+    const url = n.url || `https://github.com/Sin213/${p.slug}/releases/tag/${n.tag}`;
+    const tag = `Latest: <b>${escapeAttr(n.tag)}</b>`;
     const body = (n.body || '').trim();
     let bodyHtml = '';
     if (body) {
@@ -791,7 +795,8 @@
     //   - installed, no update → current version (what you have)
     //   - not installed → /releases/latest
     const update = hasUpdate(prog);
-    const releaseTag = update ? (prog.latestTag || '') : (installed && prog.version ? `v${prog.version.replace(/^v/, '')}` : '');
+    const rawTag = update ? (prog.latestTag || '') : (installed && prog.version ? `v${prog.version.replace(/^v/, '')}` : '');
+    const releaseTag = isValidReleaseTag(rawTag) ? rawTag : '';
     const releaseUrl = releaseTag
       ? `https://github.com/Sin213/${prog.slug}/releases/tag/${releaseTag}`
       : `https://github.com/Sin213/${prog.slug}/releases/latest`;
@@ -1121,7 +1126,7 @@
             icon: DEFAULT_ICON,
             category: 'cat-utils',
             lang: r.lang || '—',
-            version: r.version || '—',
+            version: r.version || '',
             updated: r.updated || '—',
             installed: false,
             hasUpdate: false,
@@ -1160,7 +1165,7 @@
       for (const [slug, info] of Object.entries(res.releases || {})) {
         state.releaseNotes[slug] = info;
         const prog = window.PROGRAMS.find(p => p.slug === slug);
-        if (prog && info.tag) prog.latestTag = info.tag;
+        if (prog && isValidReleaseTag(info.tag)) prog.latestTag = info.tag;
       }
     } catch {
       // Rate-limited / offline — the banner already tells the user.
