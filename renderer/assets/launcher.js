@@ -283,8 +283,9 @@
     const launchAction = !installed ? 'install' : isRunning ? 'focus' : 'launch';
     const launchDisabled = isLaunching || busy === 'installing';
 
-    const openMode   = prog.openMode || 'external';
-    const proto      = state.processes[tab.slug]?.protocol ?? null;
+    const procEntry  = state.processes[tab.slug];
+    const openMode   = procEntry?.openMode ?? prog.openMode ?? 'external';
+    const proto      = procEntry?.protocol ?? null;
     const tabUrl     = proto?.tabUrl ?? null;
     const tabFallback = proto?.tabFallback ?? false;
     const isTabWeb   = openMode === 'tab-web' && !tabFallback;
@@ -761,9 +762,10 @@
     render();
     try {
       if (IS_DESKTOP) {
-        const res = await coveAPI.launch(slug, prog.openMode);
+        const launchMode = (prog.openMode === 'tab-web' && !state.foxyMode) ? undefined : prog.openMode;
+        const res = await coveAPI.launch(slug, launchMode);
         if (res.alreadyRunning) {
-          if (state.foxyMode) ensureTab(prog);
+          if (state.foxyMode && state.processes[slug]?.openMode === 'tab-web') ensureTab(prog);
           toast(`${prog.name} is already running.`);
           return;
         }

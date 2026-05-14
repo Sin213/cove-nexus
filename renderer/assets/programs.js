@@ -74,6 +74,7 @@ window.PROGRAMS = [
     updated: "Apr 22, 2026",
     installed: false,
     hasUpdate: false,
+    openMode: "tab-web",
   },
   {
     name: "Cove Gif Maker",
