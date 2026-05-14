@@ -53,13 +53,6 @@
       if (!state.tabs.length) state.tabs = [{ id: 'home', kind: 'home', title: 'Home' }];
     } else {
       document.body.removeAttribute('data-foxy');
-      for (const tab of state.tabs) {
-        if (tab.kind !== 'tool') continue;
-        const prog = window.PROGRAMS?.find(p => p.slug === tab.slug);
-        if (prog?.openMode === 'tab-web') {
-          coveAPI.closeTabWeb(tab.id).catch(() => {});
-        }
-      }
       state.tabs = [];
       state.activeTabId = 'home';
       const mainEl = document.querySelector('main.main');
@@ -88,10 +81,6 @@
     if (state.activeTabId === id) {
       const prev = state.tabs[idx - 1] || state.tabs[0];
       state.activeTabId = prev ? prev.id : 'home';
-    }
-    const prog = window.PROGRAMS?.find(p => p.slug === id);
-    if (prog?.openMode === 'tab-web') {
-      coveAPI.closeTabWeb(id).catch(() => {});
     }
   }
 
@@ -274,23 +263,26 @@
     const isRunning   = procStatus === 'running';
     const isLaunching = procStatus === 'launching' || busy === 'launching';
 
-    // Priority: installing > launching > not-installed > running > default
-    const launchLabel = busy === 'installing' ? 'Installing…'
-      : isLaunching ? 'Launching…'
-      : !installed ? 'Install & Launch'
-      : isRunning ? 'Focus App'
-      : 'Launch';
-    const launchAction = !installed ? 'install' : isRunning ? 'focus' : 'launch';
-    const launchDisabled = isLaunching || busy === 'installing';
-
     const procEntry  = state.processes[tab.slug];
     const openMode   = procEntry?.openMode ?? prog.openMode ?? 'external';
     const proto      = procEntry?.protocol ?? null;
     const tabUrl     = proto?.tabUrl ?? null;
     const tabFallback = proto?.tabFallback ?? false;
     const isTabWeb   = openMode === 'tab-web' && !tabFallback;
-
     const showHostedView = isTabWeb && !!tabUrl;
+
+    // tab-web loading: process is running but tab_ready hasn't arrived yet
+    const isTabWebLoading = isTabWeb && isRunning && !showHostedView;
+
+    // Priority: installing > launching > tab-web loading > not-installed > running > default
+    const launchLabel = busy === 'installing' ? 'Installing…'
+      : isLaunching ? 'Launching…'
+      : isTabWebLoading ? 'Loading…'
+      : !installed ? 'Install & Launch'
+      : isRunning ? 'Focus App'
+      : 'Launch';
+    const launchAction = !installed ? 'install' : (isRunning && !isTabWebLoading) ? 'focus' : 'launch';
+    const launchDisabled = isLaunching || busy === 'installing' || isTabWebLoading;
     let sessionNote;
     if (showHostedView) {
       sessionNote = '';
