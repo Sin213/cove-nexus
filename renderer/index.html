@@ -908,9 +908,15 @@
   /* Remove negative bleed — .main no longer has 32px horizontal padding in this mode */
   main.main.tab-tool.tab-web-active > #foxy-tabs { margin: 0; }
   main.main.tab-tool.tab-web-active > #foxy-session { flex: 0 0 200px; min-height: 0; overflow-y: auto; padding-bottom: 0; }
+  /* True embedded chrome: the hosted app owns the entire body region under
+     the foxy tab strip. Launcher chrome (header, badges, action buttons,
+     idle/protocol strip) is hidden in renderer; main.js drops the matching
+     SESSION_CONTROLS_H reservation when chromeMode === 'embedded'. */
+  main.main.tab-tool.tab-web-active.tab-web-embedded > #foxy-session { display: none !important; flex: 0 0 0; }
   /* #tab-web-host is a persistent sibling of #foxy-session; hidden by default */
   #tab-web-host { display: none; border-radius: 8px; overflow: hidden; }
   main.main.tab-tool.tab-web-active > #tab-web-host { display: block; flex: 1; min-height: 200px; }
+  main.main.tab-tool.tab-web-active.tab-web-embedded > #tab-web-host { border-radius: 0; }
   /* Force full-bleed regardless of data-chrome setting when hosted view is active.
      Security boundary: chrome-wrap/chrome padding would offset the native view from its trusted region. */
   body:has(main.main.tab-web-active) .chrome-wrap { padding: 0; }

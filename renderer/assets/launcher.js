@@ -117,6 +117,38 @@
     if (_hostedRO) { _hostedRO.disconnect(); _hostedRO = null; }
     if (_boundsRaf) { cancelAnimationFrame(_boundsRaf); _boundsRaf = null; }
   }
+
+  // Last chrome mode pushed to main — avoids spamming the IPC every render.
+  let _lastChromeMode = 'standard';
+  function setChromeMode(mode) {
+    const next = mode === 'embedded' ? 'embedded' : 'standard';
+    if (next === _lastChromeMode) return;
+    _lastChromeMode = next;
+    if (IS_DESKTOP && coveAPI.setChromeMode) {
+      coveAPI.setChromeMode(next).catch(() => {});
+    }
+  }
+
+  // Modal-open ref count. While > 0 the embedded WebContentsView is detached
+  // so DOM modals (Settings, Pin) overlay it; on drop-to-zero the view is
+  // re-attached at the current bounds. Native views sit above the DOM in
+  // Electron — z-index alone cannot lift a modal above a WebContentsView.
+  let _modalDepth = 0;
+  function pushModalState() {
+    _modalDepth += 1;
+    if (_modalDepth === 1 && state.activeHostedSlug && IS_DESKTOP) {
+      detachHostedRO();
+      coveAPI.hideTabWebView(state.activeHostedSlug).catch(() => {});
+    }
+  }
+  function popModalState() {
+    if (_modalDepth === 0) return;
+    _modalDepth -= 1;
+    if (_modalDepth === 0 && state.activeHostedSlug && IS_DESKTOP) {
+      attachHostedRO(state.activeHostedSlug);
+    }
+  }
+  function isModalOpen() { return _modalDepth > 0; }
   // ---- End bounds management ----
 
   function processStatusFor(slug) {
@@ -197,41 +229,25 @@
     const session = document.getElementById('foxy-session');
     const mainEl = document.querySelector('main.main');
     if (!session || !mainEl) return;
-    if (!state.foxyMode || state.activeTabId === 'home') {
-      mainEl.classList.remove('tab-tool', 'tab-web-active');
+    const resetEmbedded = () => {
+      mainEl.classList.remove('tab-tool', 'tab-web-active', 'tab-web-embedded');
       session.hidden = true;
       document.getElementById('tab-web-host').hidden = true;
+      setChromeMode('standard');
       if (state.activeHostedSlug) {
         detachHostedRO();
         coveAPI.hideTabWebView(state.activeHostedSlug).catch(() => {});
         state.activeHostedSlug = null;
       }
+    };
+    if (!state.foxyMode || state.activeTabId === 'home') {
+      resetEmbedded();
       return;
     }
     const tab = state.tabs.find(t => t.id === state.activeTabId);
-    if (!tab) {
-      mainEl.classList.remove('tab-tool', 'tab-web-active');
-      session.hidden = true;
-      document.getElementById('tab-web-host').hidden = true;
-      if (state.activeHostedSlug) {
-        detachHostedRO();
-        coveAPI.hideTabWebView(state.activeHostedSlug).catch(() => {});
-        state.activeHostedSlug = null;
-      }
-      return;
-    }
+    if (!tab) { resetEmbedded(); return; }
     const prog = window.PROGRAMS.find(p => p.slug === tab.slug);
-    if (!prog) {
-      mainEl.classList.remove('tab-tool', 'tab-web-active');
-      session.hidden = true;
-      document.getElementById('tab-web-host').hidden = true;
-      if (state.activeHostedSlug) {
-        detachHostedRO();
-        coveAPI.hideTabWebView(state.activeHostedSlug).catch(() => {});
-        state.activeHostedSlug = null;
-      }
-      return;
-    }
+    if (!prog) { resetEmbedded(); return; }
     const installed = isInstalled(prog);
     const update = installed && hasUpdate(prog);
     const busy = state.busy[prog.slug];
@@ -248,6 +264,50 @@
     const procStatus = processStatusFor(prog.slug);
     const procCssClass = procStatus.replace(/_/g, '-'); // 'not_running' → 'not-running'
 
+    const isRunning   = procStatus === 'running';
+    const isLaunching = procStatus === 'launching' || busy === 'launching';
+
+    // Embedded chrome decision uses runtime mode only — registry capability
+    // (prog.openMode) is intentionally ignored here so that an externally
+    // launched tab-web-capable app keeps the standard launcher chrome.
+    const procEntry      = state.processes[tab.slug];
+    const runtimeOpenMode = procEntry?.openMode ?? null;
+    const proto          = procEntry?.protocol ?? null;
+    const tabUrl         = proto?.tabUrl ?? null;
+    const tabFallback    = proto?.tabFallback ?? false;
+    const isRuntimeTabWeb = runtimeOpenMode === 'tab-web' && !tabFallback;
+    const showHostedView  = isRuntimeTabWeb && !!tabUrl;
+    const isTabWebLoading = isRuntimeTabWeb && isRunning && !showHostedView;
+
+    // Decide what chrome the user should see for this session.
+    //   embedded — true Foxy app: hosted view owns the body region.
+    //   standard — external launch / waiting / fallback: launcher chrome.
+    // The label-only registry hint (prog.openMode) is allowed to influence
+    // standard-mode copy ("Loading app UI…") but never the embedded switch.
+    const isEmbeddedChrome = showHostedView;
+
+    if (isEmbeddedChrome) {
+      // Hide the launcher chrome entirely so the embedded app fills the area
+      // below the foxy tab strip. Keep the session element empty so we don't
+      // accidentally reveal stale chrome while toggling tabs.
+      session.innerHTML = '';
+      session.hidden = true;
+      mainEl.classList.add('tab-tool', 'tab-web-active', 'tab-web-embedded');
+      document.getElementById('tab-web-host').hidden = false;
+      setChromeMode('embedded');
+      const prevSlug = state.activeHostedSlug;
+      if (prevSlug && prevSlug !== slug) {
+        coveAPI.hideTabWebView(prevSlug).catch(() => {});
+      }
+      state.activeHostedSlug = slug;
+      // While a modal is open the view is detached on purpose — don't
+      // re-attach until the modal closes (popModalState handles that).
+      if (!isModalOpen()) attachHostedRO(slug);
+      return;
+    }
+
+    // Standard launcher chrome path — external launch, waiting on tab_ready,
+    // tab-web fallback, or simply not running.
     const badges = [
       installed
         ? `<span class="foxy-pill installed">Installed${version ? ' ' + version : ''}</span>`
@@ -260,20 +320,6 @@
         : '',
     ].filter(Boolean).join('');
 
-    const isRunning   = procStatus === 'running';
-    const isLaunching = procStatus === 'launching' || busy === 'launching';
-
-    const procEntry  = state.processes[tab.slug];
-    const openMode   = procEntry?.openMode ?? prog.openMode ?? 'external';
-    const proto      = procEntry?.protocol ?? null;
-    const tabUrl     = proto?.tabUrl ?? null;
-    const tabFallback = proto?.tabFallback ?? false;
-    const isTabWeb   = openMode === 'tab-web' && !tabFallback;
-    const showHostedView = isTabWeb && !!tabUrl;
-
-    // tab-web loading: process is running but tab_ready hasn't arrived yet
-    const isTabWebLoading = isTabWeb && isRunning && !showHostedView;
-
     // Priority: installing > launching > tab-web loading > not-installed > running > default
     const launchLabel = busy === 'installing' ? 'Installing…'
       : isLaunching ? 'Launching…'
@@ -284,11 +330,9 @@
     const launchAction = !installed ? 'install' : (isRunning && !isTabWebLoading) ? 'focus' : 'launch';
     const launchDisabled = isLaunching || busy === 'installing' || isTabWebLoading;
     let sessionNote;
-    if (showHostedView) {
-      sessionNote = '';
-    } else if (isTabWeb && isRunning) {
+    if (isRuntimeTabWeb && isRunning) {
       sessionNote = `<div class="foxy-tabweb-loading"><span class="foxy-tabweb-loading-text">Loading app UI…</span></div>`;
-    } else if (openMode === 'tab-web' && tabFallback) {
+    } else if (runtimeOpenMode === 'tab-web' && tabFallback) {
       sessionNote = `<p class="foxy-session-note">App opened externally — it was unable to load inside Nexus.</p>`;
     } else {
       sessionNote = `<p class="foxy-session-note">The app runs as a separate window outside Cove Nexus. Switch to it in your OS taskbar to use it.</p>`;
@@ -318,23 +362,15 @@
     `;
     session.hidden = false;
     mainEl.classList.add('tab-tool');
-    mainEl.classList.toggle('tab-web-active', showHostedView);
-    document.getElementById('tab-web-host').hidden = !showHostedView;
+    mainEl.classList.remove('tab-web-active', 'tab-web-embedded');
+    document.getElementById('tab-web-host').hidden = true;
+    setChromeMode('standard');
 
-    // Manage hosted WebContentsView attachment
     const prevSlug = state.activeHostedSlug;
-    if (showHostedView) {
-      if (prevSlug && prevSlug !== slug) {
-        coveAPI.hideTabWebView(prevSlug).catch(() => {});
-      }
-      state.activeHostedSlug = slug;
-      attachHostedRO(slug);
-    } else {
-      if (prevSlug) {
-        detachHostedRO();
-        coveAPI.hideTabWebView(prevSlug).catch(() => {});
-        state.activeHostedSlug = null;
-      }
+    if (prevSlug) {
+      detachHostedRO();
+      coveAPI.hideTabWebView(prevSlug).catch(() => {});
+      state.activeHostedSlug = null;
     }
   }
 
@@ -1499,10 +1535,16 @@
   }
   function openSettings() {
     if (!settingsOverlay) return;
+    if (settingsOverlay.classList.contains('open')) { refreshSettingsPaths(); return; }
     refreshSettingsPaths();
     settingsOverlay.classList.add('open');
+    pushModalState();
   }
-  function closeSettings() { settingsOverlay?.classList.remove('open'); }
+  function closeSettings() {
+    if (!settingsOverlay?.classList.contains('open')) return;
+    settingsOverlay.classList.remove('open');
+    popModalState();
+  }
 
   document.getElementById('btn-settings')?.addEventListener('click', openSettings);
   document.getElementById('settings-close')?.addEventListener('click', closeSettings);
@@ -1576,10 +1618,17 @@
   let pinProg = null;
   let pinSelectedTag = '';
 
-  function closePinModal() { pinOverlay?.classList.remove('open'); pinProg = null; pinSelectedTag = ''; }
+  function closePinModal() {
+    const wasOpen = pinOverlay?.classList.contains('open');
+    pinOverlay?.classList.remove('open');
+    pinProg = null;
+    pinSelectedTag = '';
+    if (wasOpen) popModalState();
+  }
 
   async function openPinModal(prog) {
     if (!IS_DESKTOP || !pinOverlay) return;
+    const wasOpen = pinOverlay.classList.contains('open');
     pinProg = prog;
     pinSelectedTag = '';
     pinTitle.textContent = `Pin ${prog.name}`;
@@ -1588,6 +1637,7 @@
     pinConfirm.disabled = true;
     pinUnpin.style.display = prog.pinnedTag ? 'inline-block' : 'none';
     pinOverlay.classList.add('open');
+    if (!wasOpen) pushModalState();
 
     try {
       const res = await coveAPI.releases(prog.slug);
