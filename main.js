@@ -1309,18 +1309,28 @@ h1{color:#58a6ff;margin-bottom:1rem}code{background:#21262d;padding:.15rem .4rem
 // Renderer must not send dimensions — only this narrow enum.
 let sidebarBaseState = 'expanded'; // 'expanded' | 'hidden'
 
+// Tab-web chrome mode — set via cove:tab-web:chromeMode.
+// 'standard' = Nexus launcher chrome (foxy-session block) reserved above the
+// hosted view. 'embedded' = true-app mode: the hosted view owns the entire
+// area below the foxy tab strip. Invalid input falls back to 'standard' (safe
+// default — preserves the existing security boundary for non-embedded apps).
+let chromeMode = 'standard'; // 'standard' | 'embedded'
+
 // Chrome layout constants — must match renderer/index.html CSS exactly.
 const TITLEBAR_H         = 36;  // .titlebar { flex: 0 0 36px }
 const FOXY_TABS_H        = 46;  // #foxy-tabs { height: 46px } — always present when tab-web:show fires
 const SIDEBAR_W_EXPANDED = 240; // .layout { grid-template-columns: 240px 1fr }
-const SESSION_CONTROLS_H = 200; // reserved height for #foxy-session; enforced by CSS flex: 0 0 200px + min-height: 0 (security boundary)
+const SESSION_CONTROLS_H = 200; // reserved height for #foxy-session in standard chrome mode (security boundary)
 
 function getTrustedTabWebRegion(cw, ch) {
-  // Top: titlebar + Foxy tab strip + session controls reserve.
-  // SESSION_CONTROLS_H is part of the native-view security boundary.
-  // CSS enforces flex: 0 0 200px + min-height: 0 — controls scroll inside,
-  // cannot push the host pane down regardless of content height.
-  const topH = TITLEBAR_H + FOXY_TABS_H + SESSION_CONTROLS_H;
+  // Top: titlebar + Foxy tab strip; in 'standard' chrome mode also reserve
+  // the session-controls strip. In 'embedded' chrome mode the launcher chrome
+  // is hidden in the renderer and the hosted view owns the full body region.
+  // SESSION_CONTROLS_H remains part of the native-view security boundary for
+  // standard mode — CSS enforces flex: 0 0 200px + min-height: 0 so controls
+  // scroll inside and cannot push the host pane down.
+  const sessionReserve = chromeMode === 'embedded' ? 0 : SESSION_CONTROLS_H;
+  const topH = TITLEBAR_H + FOXY_TABS_H + sessionReserve;
   // Left: when sidebar is hidden the host pane starts at x=0; otherwise it
   // must not overlap the sidebar. Main converts the enum to a fixed constant —
   // no renderer-supplied dimension is trusted.
@@ -2041,6 +2051,13 @@ ipcMain.handle('cove:tab-web:sidebarState', (_e, s) => {
   // Accept only the two known layout states; invalid input falls back to 'expanded'.
   // Renderer sends the enum only — no dimensions. Main translates to fixed geometry.
   sidebarBaseState = s === 'hidden' ? 'hidden' : 'expanded';
+});
+
+ipcMain.handle('cove:tab-web:chromeMode', (_e, m) => {
+  // Accept only the two known chrome modes; invalid input falls back to
+  // 'standard' (preserves the SESSION_CONTROLS_H reservation — the safe
+  // default that keeps Nexus host chrome visible).
+  chromeMode = m === 'embedded' ? 'embedded' : 'standard';
 });
 
 ipcMain.handle('cove:tab-web:close', (_e, slug) => {

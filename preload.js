@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('coveAPI', {
   showTabWebView: (slug, bounds) => ipcRenderer.invoke('cove:tab-web:show', slug, bounds),
   hideTabWebView: (slug)         => ipcRenderer.invoke('cove:tab-web:hide', slug),
   setSidebarState: (s)           => ipcRenderer.invoke('cove:tab-web:sidebarState', s),
+  setChromeMode:   (m)           => ipcRenderer.invoke('cove:tab-web:chromeMode', m),
   uninstall:      (slug) => ipcRenderer.invoke('cove:uninstall', slug),
   revealInstall:  (slug) => ipcRenderer.invoke('cove:revealInstall', slug),
   discover:       (opts) => ipcRenderer.invoke('cove:discover', opts || {}),
