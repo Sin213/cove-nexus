@@ -6,6 +6,8 @@
 
 Cove Nexus is a desktop launcher for the [Sin213](https://github.com/Sin213) fleet of Cove tools (upscaler, compressor, PDF kit, meme maker, video editor, and more). Browse the whole collection, install any tool with one click, launch it, and keep it up to date — all from one place.
 
+Supported Cove tools can also open directly **inside** Nexus via **Foxy Mode**, so you don't have to juggle separate windows. Cove Meme Maker is the first tool wired up for it; the rest still launch as their own apps and behave exactly like before.
+
 ---
 
 ## Install
@@ -40,6 +42,7 @@ Two options from the [Releases](https://github.com/Sin213/cove-nexus/releases/la
 ## Features
 
 - **One-window launcher** for every Cove tool — no hunting for AppImages or `.exe`s.
+- **Foxy Mode** — supported tools open as a tab inside Nexus instead of a separate window. The card swaps **Launch** for **Running** while it's open; clicking **Running** focuses the existing tab instead of spawning a duplicate. Cove Meme Maker is the first tool to ship with Foxy Mode; everything else launches standalone as usual.
 - **Auto-discovery from GitHub** — any `cove-*` repo on the account shows up automatically (`cove-*-bot` repos are filtered out).
 - **Install / launch / update** — each tool is a single click, with a live progress bar showing download bytes and verification status.
 - **Per-tool release notes** — the latest version and a short changelog preview sit on every card, fetched live from GitHub.
@@ -73,6 +76,16 @@ On every scan, Cove Nexus walks your programs folder. Any file matching a Cove r
 
 Cove Nexus spawns the tracked binary directly. Failures to spawn (missing binary, wrong permissions) surface as errors in the UI instead of silent fake-success toasts.
 
+### Foxy Mode
+
+Some Cove tools expose an embedded web UI that Nexus can host directly. When a tool is marked as Foxy-capable in the registry, **Launch** opens it as a tab inside the Nexus window instead of starting it as a separate process.
+
+While a Foxy Mode app is open, its card shows **Running**. Clicking **Running** snaps focus back to the existing tab — Nexus never opens a duplicate. Closing the tab returns the card to its normal **Launch** state.
+
+Foxy Mode is opt-in per tool: tools that don't advertise it still install, launch, and update as standalone apps. Nexus continues to manage every binary in your configured programs folder either way.
+
+**For developers:** Foxy-capable tools advertise a small embedded web endpoint that Nexus loads inside an isolated, sandboxed view. Standalone launches are unaffected.
+
 ### Silent self-update
 
 Cove Nexus uses [`electron-updater`](https://www.electron.build/auto-update) to check `github.com/Sin213/cove-nexus/releases/latest` on launch and hourly while running. When a newer release is found it downloads in the background and relaunches silently when ready. No prompt.
@@ -93,7 +106,7 @@ The static registry includes these nine tools by default. Any other `cove-*` rep
 | [cove-universal-converter](https://github.com/Sin213/cove-universal-converter) | One converter for every file format |
 | [cove-pdf-kit](https://github.com/Sin213/cove-pdf-kit) | Merge, split, compress, OCR PDFs |
 | [cove-pdf-editor](https://github.com/Sin213/cove-pdf-editor) | Edit PDFs like native documents |
-| [cove-meme-maker](https://github.com/Sin213/cove-meme-maker) | Meme templates with a live editor |
+| [cove-meme-maker](https://github.com/Sin213/cove-meme-maker) | Meme templates with a live editor — opens inside Nexus via **Foxy Mode** |
 | [cove-gif-maker](https://github.com/Sin213/cove-gif-maker) | Clips → pixel-perfect GIFs |
 | [cove-video-editor](https://github.com/Sin213/cove-video-editor) | Keyboard-driven timeline editor |
 
