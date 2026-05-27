@@ -1452,24 +1452,32 @@ async function scanOneInstalled(slug, info) {
   let latestTag = '';
   let notesBody = '';
   let notesUrl = '';
+  let sawLatestRelease = false;
+  let latestHasCompatibleAsset = false;
   try {
     const rel = await fetchLatestRelease(slug);
     const rawTag = rel?.tag_name || '';
     if (isValidTag(rawTag)) {
-      latestTag = rawTag;
-      notesUrl = rel?.html_url || '';
+      sawLatestRelease = true;
+      latestHasCompatibleAsset = !!pickAsset(rel?.assets);
+      if (latestHasCompatibleAsset) {
+        latestTag = rawTag;
+        notesUrl = rel?.html_url || '';
+      }
     }
     // Keep the card-preview small — we trim to first 400 chars here, and the
     // renderer clamps visually to 2 lines. Strip HTML-comment boilerplate
     // that electron-builder-generated notes sometimes contain.
-    const raw = typeof rel?.body === 'string' ? rel.body : '';
-    notesBody = raw.replace(/<!--[\s\S]*?-->/g, '').trim().slice(0, 400);
+    if (latestHasCompatibleAsset) {
+      const raw = typeof rel?.body === 'string' ? rel.body : '';
+      notesBody = raw.replace(/<!--[\s\S]*?-->/g, '').trim().slice(0, 400);
+    }
   } catch {}
 
   // Persist the most recent successful latestTag so a transient rate-limit
   // (empty latestTag this tick) doesn't silently hide a previously-detected
   // update. Falls back to the cached value when this scan came up empty.
-  const cachedLatest = isValidTag(info.lastKnownLatestTag) ? info.lastKnownLatestTag : '';
+  const cachedLatest = !sawLatestRelease && isValidTag(info.lastKnownLatestTag) ? info.lastKnownLatestTag : '';
   if (latestTag && latestTag !== (info.lastKnownLatestTag || '')) {
     try {
       const reg = readRegistry();
@@ -1490,13 +1498,15 @@ async function scanOneInstalled(slug, info) {
   // True only when GitHub gave us nothing AND we have no cached value to
   // fall back on — the renderer can show a "?" pill instead of pretending
   // the installed version is the latest.
-  const latestUnknown = !pinned && !!localVer && !effectiveLatest;
+  const latestUnknown = !pinned && !!localVer && !effectiveLatest && !sawLatestRelease;
 
   if (process.env.DEBUG_UPDATE_CHECK) {
     console.log('[cove-update-check]', {
       slug,
       installedTag: info.tag,
       latestTag,
+      sawLatestRelease,
+      latestHasCompatibleAsset,
       cachedLatest,
       effectiveLatest,
       pinned,

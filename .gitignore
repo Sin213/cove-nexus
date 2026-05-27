@@ -13,3 +13,43 @@ codex-reviews/
 CLAUDE.md
 WORKFLOW.md
 RELEASES.md
+AGENTS.md
+.claudeignore
+.claude/
+.codex/
+.agents/
+
+.codex-reviews/
+
+# Session aids (orientation snapshots)
+*-orientation.md
+
+# Local credentials / secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+*.local
+*.secret
+*secret*
+*token*
+*credential*
+cookies.txt
+.npmrc
+.pypirc
+.netrc
+id_rsa
+id_ed25519
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# Local caches / test output
+.cache/
+.tmp/
+tmp/
+coverage/
+out/

@@ -1,3 +1,5 @@
 snapshots/
 status.json
 sessions/
+AGENTS.md
+.claudeignore
