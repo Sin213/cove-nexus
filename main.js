@@ -488,14 +488,19 @@ function ensureProgramsRoot() {
 // ---------- registry (~/.config/cove-nexus/installs.json) ----------
 // Shape: { [slug]: { tag, path, source: 'managed' | 'adopted' } }
 
+let _registryCache = null;
+
 function readRegistry() {
-  try { return JSON.parse(fs.readFileSync(INSTALLS_FILE, 'utf8')) || {}; }
-  catch { return {}; }
+  if (_registryCache !== null) return _registryCache;
+  try { _registryCache = JSON.parse(fs.readFileSync(INSTALLS_FILE, 'utf8')) || {}; }
+  catch { _registryCache = {}; }
+  return _registryCache;
 }
 
 function writeRegistry(reg) {
   fs.mkdirSync(USER_DATA, { recursive: true });
   fs.writeFileSync(INSTALLS_FILE, JSON.stringify(reg, null, 2), 'utf8');
+  _registryCache = reg;
 }
 
 function registerInstall(slug, info) {

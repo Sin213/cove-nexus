@@ -1260,9 +1260,10 @@
     return false;
   }
 
+  const _unsubs = [];
   if (IS_DESKTOP && coveAPI.onInstallProgress) {
     let lastPhase = {};
-    coveAPI.onInstallProgress((ev) => {
+    const unsub = coveAPI.onInstallProgress((ev) => {
       if (!ev?.slug) return;
       const prev = state.progress[ev.slug];
       state.progress[ev.slug] = {
@@ -1279,6 +1280,7 @@
       if (phaseChanged) render();
       else patchProgressInPlace(ev.slug);
     });
+    if (typeof unsub === 'function') _unsubs.push(unsub);
   }
 
   // ——— window controls ———
@@ -1504,13 +1506,14 @@
 
   // Tray → "Check for updates"
   if (IS_DESKTOP && coveAPI.onTrayCheckUpdates) {
-    coveAPI.onTrayCheckUpdates(() => { doRefresh({ force: true }); });
+    const unsub = coveAPI.onTrayCheckUpdates(() => { doRefresh({ force: true }); });
+    if (typeof unsub === 'function') _unsubs.push(unsub);
   }
 
   // Portable-only: new-version banner. Setup.exe and AppImage auto-update
   // silently; Portable users need a nudge.
   if (IS_DESKTOP && coveAPI.onSelfUpdateAvailable) {
-    coveAPI.onSelfUpdateAvailable((payload) => {
+    const unsub = coveAPI.onSelfUpdateAvailable((payload) => {
       if (!payload?.version) return;
       const dismissed = (() => {
         try { return localStorage.getItem('cove-self-update-dismissed') === payload.version; }
@@ -1532,7 +1535,9 @@
       };
       banner.classList.add('show');
     });
+    if (typeof unsub === 'function') _unsubs.push(unsub);
   }
+  window.addEventListener('beforeunload', () => { _unsubs.forEach(fn => fn()); });
   function openSettings() {
     if (!settingsOverlay) return;
     if (settingsOverlay.classList.contains('open')) { refreshSettingsPaths(); return; }

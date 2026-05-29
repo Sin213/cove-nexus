@@ -1,6 +1,6 @@
 {
   "name": "cove-nexus",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "The Cove Nexus — install, launch, and update every Cove tool from a single window.",
   "main": "main.js",
   "author": {
@@ -21,7 +21,8 @@
   },
   "devDependencies": {
     "electron": "^33.2.0",
-    "electron-builder": "^26.9.0"
+    "electron-builder": "^26.9.0",
+    "eslint": "^9.0.0"
   },
   "build": {
     "appId": "com.sin.cove-nexus",
