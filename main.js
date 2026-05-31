@@ -12,6 +12,11 @@ const APP_ID = 'cove-nexus';
 const GITHUB_OWNER = 'Sin213';
 const GITHUB_REPO = 'cove-nexus';
 const UA = 'cove-nexus-launcher';
+// Repos under the cove- namespace that are not installable tools.
+// Note: repos with no GitHub release are already hidden by the release gate in
+// cove:discover. Add entries here only for repos that have releases but should
+// still be excluded (e.g. internal tooling).
+const EXCLUDED_REPOS = new Set([]);
 
 // Pin the on-disk name to a lowercase, XDG-friendly form rather than the
 // display name ("Cove Nexus"), which Electron would otherwise turn into
@@ -2280,11 +2285,14 @@ ipcMain.handle('cove:discover', async (_e, opts = {}) => {
     const repos = await httpsGetJson(url);
     // Bot repos (e.g. cove-*-bot) aren't user-installable tools, so we hide
     // them from discovery. Anything with "bot" in the name is excluded.
-    const mapped = (repos || [])
+    // Repos with no published GitHub release are also excluded — this gates
+    // out scripts, experiments, and WIP repos automatically.
+    const candidates = (repos || [])
       .filter(r => typeof r?.name === 'string'
         && /^cove-/i.test(r.name)
         && !/bot/i.test(r.name)
         && r.name !== GITHUB_REPO
+        && !EXCLUDED_REPOS.has(r.name)
         && !r.archived && !r.disabled)
       .map(r => ({
         slug: r.name,
@@ -2295,6 +2303,10 @@ ipcMain.handle('cove:discover', async (_e, opts = {}) => {
         version: '',
         fork: !!r.fork,
       }));
+    const releaseChecks = await Promise.all(
+      candidates.map(r => fetchLatestRelease(r.slug).then(rel => rel?.tag_name ? r : null).catch(() => null))
+    );
+    const mapped = releaseChecks.filter(Boolean);
     return { ok: true, repos: mapped, rateLimitedUntil: rateLimitUntil };
   } catch (err) {
     return { ok: false, error: String(err?.message || err), rateLimitedUntil: rateLimitUntil };
