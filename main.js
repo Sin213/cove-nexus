@@ -1430,7 +1430,6 @@ const LAUNCH_ENV_KEYS = new Set([
   'LANG', 'LANGUAGE', 'TZ',
   'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY',
   'DBUS_SESSION_BUS_ADDRESS',
-  'LD_LIBRARY_PATH',
   'SHELL', 'TERM',
 ]);
 const LAUNCH_ENV_PREFIXES = ['XDG_', 'LC_', 'GTK_', 'QT_', 'GDK_'];
@@ -1449,20 +1448,14 @@ function buildLaunchEnv() {
       out[k] = v;
     }
   }
-  // Electron and AppImage runtimes override LD_LIBRARY_PATH and GDK_PIXBUF
-  // vars with paths to their own bundled libs. If we forward those to a child
-  // AppImage, the child's APPIMAGE_ORIGINAL_* will contain *our* bundled libs
-  // instead of the real system values, breaking xdg-open and other host
-  // processes the child spawns. Restore pre-pollution values where available,
-  // or drop the keys entirely so children inherit a clean environment.
-  if (!isWin && process.env.APPIMAGE) {
-    for (const key of ['LD_LIBRARY_PATH', 'GDK_PIXBUF_MODULE_FILE', 'GDK_PIXBUF_MODULEDIR']) {
-      const clean = process.env[`APPIMAGE_ORIGINAL_${key}`];
-      if (clean) {
-        out[key] = clean;
-      } else {
-        delete out[key];
-      }
+  // Electron and AppImage runtimes pollute LD_LIBRARY_PATH, LD_PRELOAD,
+  // and GDK_PIXBUF vars with bundled-lib paths. Forwarding those to child
+  // AppImages breaks their xdg-open / file-manager calls. Strip them
+  // unconditionally on Linux — child AppImages set their own, and system
+  // binaries use system libs.
+  if (!isWin) {
+    for (const key of ['LD_LIBRARY_PATH', 'LD_PRELOAD', 'GDK_PIXBUF_MODULE_FILE', 'GDK_PIXBUF_MODULEDIR']) {
+      delete out[key];
     }
   }
   return out;
