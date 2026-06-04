@@ -4,6 +4,18 @@
 // tag (installs.json) to GitHub's /releases/latest tag.
 window.PROGRAMS = [
   {
+    name: "Cove Narrator",
+    slug: "cove-narrator",
+    desc: "Offline text-to-speech with voice blending, phoneme control, and document reading. 27 voices, reference audio matching, WAV export.",
+    icon: "narrator",
+    category: "cat-media",
+    lang: "Python",
+    version: "1.0.0",
+    updated: "Jun 4, 2026",
+    installed: false,
+    hasUpdate: false,
+  },
+  {
     name: "Cove Image Upscaler",
     slug: "cove-image-upscaler",
     desc: "Cross-platform desktop image upscaler for photos and anime. Electron + React + NCNN Vulkan — fully offline, no Python, no CUDA. Linux + Windows.",
@@ -118,6 +130,7 @@ window.PROGRAMS = [
 
 // Minimal inline SVG icons — simple glyphs only (no fake product art)
 window.ICONS = {
+  narrator: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M7 8v8M17 8v8M3 11v2M21 11v2M9 6v12M15 6v12"/></svg>`,
   upscale: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M10 20H4v-6"/><path d="m20 4-7 7"/><path d="m4 20 7-7"/></svg>`,
   download: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>`,
   compress: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/><path d="M9 9 4 4"/><path d="m15 9 5-5"/><path d="M9 15l-5 5"/><path d="m15 15 5 5"/></svg>`,
