@@ -1432,7 +1432,7 @@ const LAUNCH_ENV_KEYS = new Set([
   'DBUS_SESSION_BUS_ADDRESS',
   'SHELL', 'TERM',
 ]);
-const LAUNCH_ENV_PREFIXES = ['XDG_', 'LC_', 'GTK_', 'QT_', 'GDK_'];
+const LAUNCH_ENV_PREFIXES = ['XDG_', 'LC_', 'GTK_', 'QT_', 'GDK_', 'KDE_'];
 function buildLaunchEnv() {
   // Windows env vars are case-insensitive at the OS level but Object.entries
   // returns them with whatever casing the process was launched with — most
