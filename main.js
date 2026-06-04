@@ -1449,6 +1449,22 @@ function buildLaunchEnv() {
       out[k] = v;
     }
   }
+  // Electron and AppImage runtimes override LD_LIBRARY_PATH and GDK_PIXBUF
+  // vars with paths to their own bundled libs. If we forward those to a child
+  // AppImage, the child's APPIMAGE_ORIGINAL_* will contain *our* bundled libs
+  // instead of the real system values, breaking xdg-open and other host
+  // processes the child spawns. Restore pre-pollution values where available,
+  // or drop the keys entirely so children inherit a clean environment.
+  if (!isWin && process.env.APPIMAGE) {
+    for (const key of ['LD_LIBRARY_PATH', 'GDK_PIXBUF_MODULE_FILE', 'GDK_PIXBUF_MODULEDIR']) {
+      const clean = process.env[`APPIMAGE_ORIGINAL_${key}`];
+      if (clean) {
+        out[key] = clean;
+      } else {
+        delete out[key];
+      }
+    }
+  }
   return out;
 }
 
