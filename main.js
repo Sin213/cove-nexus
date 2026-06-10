@@ -1565,6 +1565,7 @@ ipcMain.handle('cove:appInfo', () => ({
   version: app.getVersion(),
   name: app.getName(),
   packaged: app.isPackaged,
+  platform: process.platform,
 }));
 
 ipcMain.handle('cove:config:get', () => {
@@ -2294,8 +2295,9 @@ ipcMain.handle('cove:discover', async (_e, opts = {}) => {
     const repos = await httpsGetJson(url);
     // Bot repos (e.g. cove-*-bot) aren't user-installable tools, so we hide
     // them from discovery. Anything with "bot" in the name is excluded.
-    // Repos with no published GitHub release are also excluded — this gates
-    // out scripts, experiments, and WIP repos automatically.
+    // Repos with no published GitHub release or no asset compatible with the
+    // current platform are also excluded — this gates out scripts, experiments,
+    // WIP repos, and platform-specific tools (e.g. Windows-only on Linux).
     const candidates = (repos || [])
       .filter(r => typeof r?.name === 'string'
         && /^cove-/i.test(r.name)
@@ -2313,7 +2315,9 @@ ipcMain.handle('cove:discover', async (_e, opts = {}) => {
         fork: !!r.fork,
       }));
     const releaseChecks = await Promise.all(
-      candidates.map(r => fetchLatestRelease(r.slug).then(rel => rel?.tag_name ? r : null).catch(() => null))
+      candidates.map(r => fetchLatestRelease(r.slug).then(rel =>
+        rel?.tag_name && pickAsset(rel.assets) ? r : null
+      ).catch(() => null))
     );
     const mapped = releaseChecks.filter(Boolean);
     return { ok: true, repos: mapped, rateLimitedUntil: rateLimitUntil };

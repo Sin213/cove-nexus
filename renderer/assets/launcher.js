@@ -38,6 +38,7 @@
     lastNotifTs: {},
     activeHostedSlug: null,
     sidebarHidden: false,
+    platform: '',
   };
 
   function iconFor(name) {
@@ -1765,6 +1766,12 @@
           coveAPI.config.get(),
         ]);
         if (info?.version) state.appVersion = info.version;
+        if (info?.platform) {
+          state.platform = info.platform;
+          const plat = info.platform === 'win32' ? 'windows' : info.platform;
+          window.PROGRAMS = window.PROGRAMS.filter(p =>
+            !p.platforms || p.platforms.includes(plat));
+        }
         if (quickState?.installed) state.onDisk = new Set(quickState.installed);
         if (cfg) {
           state.toolOrder = Array.isArray(cfg.toolOrder) ? cfg.toolOrder.slice() : [];
