@@ -908,29 +908,36 @@ async function installOrUpdate(slug, { force = false, tag: explicitTag } = {}) {
     throw err;
   }
 
-  // Optional checksum verification — looks for an asset named "<asset>.sha256"
-  // alongside the binary. Absent → skip silently; mismatch → abort.
-  const shaAsset = (release.assets || []).find(a => a?.name === `${asset.name}.sha256`);
-  if (shaAsset) {
+  // Optional checksum verification - looks for a bundled checksums-sha256.txt
+  // on the release, then finds the line matching this asset. Falls back to a
+  // per-asset <name>.sha256 sidecar for older releases. Absent - skip silently;
+  // mismatch - abort.
+  const bundleAsset = (release.assets || []).find(a => a?.name === 'checksums-sha256.txt');
+  const sidecarAsset = !bundleAsset && (release.assets || []).find(a => a?.name === `${asset.name}.sha256`);
+  const shaSource = bundleAsset || sidecarAsset;
+  if (shaSource) {
     sendProgress(slug, { phase: 'verify' });
     try {
-      const shaTmp = path.join(root, `.${asset.name}.sha256.part`);
-      // .sha256 sidecars are tiny — anything over 1 KiB is suspect.
-      await downloadToFile(shaAsset.browser_download_url, shaTmp, null, { maxBytes: 1024 });
+      const shaTmp = path.join(root, `.${shaSource.name}.part`);
+      // checksums-sha256.txt is small; 8 KiB is generous. Sidecars even smaller.
+      await downloadToFile(shaSource.browser_download_url, shaTmp, null, { maxBytes: 8192 });
       const shaText = fs.readFileSync(shaTmp, 'utf8').trim();
       fs.unlinkSync(shaTmp);
-      // Accept "<hex>" or "<hex>  filename" (sha256sum format).
-      const expected = (shaText.split(/\s+/)[0] || '').toLowerCase();
+      let expected = '';
+      if (bundleAsset) {
+        const line = shaText.split('\n').find(l => l.trim().endsWith(asset.name));
+        expected = (line ? line.split(/\s+/)[0] : '').toLowerCase();
+      } else {
+        expected = (shaText.split(/\s+/)[0] || '').toLowerCase();
+      }
       const actual = await sha256File(tmp);
       if (!/^[a-f0-9]{64}$/.test(expected) || expected !== actual) {
         await fsp.rm(tmp, { force: true }).catch(() => {});
         sendProgress(slug, { phase: 'error' });
-        throw new Error(`checksum mismatch for ${asset.name} (expected ${expected.slice(0, 12)}…, got ${actual.slice(0, 12)}…)`);
+        throw new Error(`checksum mismatch for ${asset.name} (expected ${expected.slice(0, 12)}..., got ${actual.slice(0, 12)}...)`);
       }
     } catch (err) {
       if (/checksum mismatch/i.test(err.message || '')) throw err;
-      // Download or parse error on the .sha256 file itself — don't block
-      // the install, just log. The binary itself succeeded.
       console.warn('[cove-sha256]', err?.message || err);
     }
   }

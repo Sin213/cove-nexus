@@ -2,16 +2,14 @@ name: Release
 
 # Tag-driven release. Push a tag of the form `v*` (e.g. v2.0.7) and this
 # workflow builds the AppImage + .deb on Linux, the NSIS Setup.exe + Portable.exe
-# on Windows, generates `.sha256` sidecars for every shipping artifact (handled
-# by build/afterAllArtifactBuild.js for the binaries and build/postReleaseSidecars.js
-# for the latest*.yml auto-update metadata), and publishes the GitHub Release.
+# on Windows, publishes a single bundled `checksums-sha256.txt` covering all
+# shipping artifacts + auto-update metadata, and publishes the GitHub Release.
 #
 # The release is created as a draft by both build jobs (electron-publish's
-# default for the GitHub provider). The finalize job runs only after both
-# builds succeed: it pulls the latest*.yml metadata files from the draft,
-# generates their .sha256 sidecars, uploads them, and promotes the draft to
-# a public release. End users only see the release once every sidecar is in
-# place.
+# default for the GitHub provider). Each build job uploads a partial
+# checksums-sha256.txt via afterAllArtifactBuild.js. The finalize job runs
+# after both builds: it downloads latest*.yml metadata from the draft,
+# merges all checksums into one file, re-uploads it, and promotes the draft.
 
 on:
   push:
@@ -75,7 +73,7 @@ jobs:
         run: npx electron-builder --win --publish=always
 
   finalize:
-    name: Finalize sidecars + publish draft
+    name: Finalize checksums + publish draft
     needs: [build-linux, build-windows]
     runs-on: ubuntu-latest
     steps:
@@ -89,11 +87,8 @@ jobs:
         with:
           node-version: 20
 
-      # postReleaseSidecars.js scans ./release/ for `latest*.yml` files,
-      # generates `.sha256` sidecars, uploads them to the draft release, and
-      # then promotes the draft. We download just the metadata files; the
-      # script handles the rest. Filenames follow electron-builder's
-      # convention: latest.yml (Windows), latest-linux.yml (Linux).
+      # Download latest*.yml so postReleaseSidecars.js can hash them and
+      # append to the bundled checksums-sha256.txt before publishing.
       - name: Download auto-update metadata from draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -111,13 +106,13 @@ jobs:
             --skip-existing
           ls -la release
 
-      - name: Generate sidecars + promote draft
+      - name: Finalize checksums + promote draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node build/postReleaseSidecars.js
 
-      # postReleaseSidecars.js publishes the draft but doesn't touch the
-      # release body. Earlier releases were hand-edited; do it in CI so
+      # postReleaseSidecars.js publishes the draft but doesn't set the
+      # release body. Do it in CI so
       # `.release-notes-vX.Y.Z.md` becomes the canonical source of the
       # GitHub release description. Also normalise the release name to
       # match prior releases ("2.0.7", not "v2.0.7"). No-op if the notes
