@@ -1,6 +1,6 @@
 {
   "name": "cove-nexus",
-  "version": "2.2.3",
+  "version": "2.2.4",
   "description": "The Cove Nexus — install, launch, and update every Cove tool from a single window.",
   "main": "main.js",
   "author": {
@@ -20,7 +20,7 @@
     "electron-updater": "^6.3.9"
   },
   "devDependencies": {
-    "electron": "^33.2.0",
+    "electron": "^33.4.11",
     "electron-builder": "^26.9.0",
     "eslint": "^9.0.0"
   },
@@ -87,5 +87,8 @@
       "shortcutName": "Cove Nexus",
       "artifactName": "Cove-Nexus-${version}-Setup.exe"
     }
+  },
+  "allowScripts": {
+    "electron@33.4.11": true
   }
 }
