@@ -590,9 +590,11 @@ function adoptFromProgramsRoot() {
     const match = matchAsset(slug, entry.name);
     if (!match) continue;
     if (reg[slug] && reg[slug].path && exists(reg[slug].path)) continue;
+    const fullPath = path.join(root, entry.name);
+    unblockExe(fullPath);
     reg[slug] = {
       tag: `v${match.version}`,
-      path: path.join(root, entry.name),
+      path: fullPath,
       source: 'adopted',
     };
     changed = true;
@@ -954,6 +956,7 @@ async function installOrUpdate(slug, { force = false, tag: explicitTag } = {}) {
   if (process.platform !== 'win32') {
     try { fs.chmodSync(finalPath, 0o755); } catch {}
   }
+  unblockExe(finalPath);
 
   // Preserve pinnedTag across updates — the pin is user intent, not a
   // function of the release we just downloaded.
@@ -1413,6 +1416,13 @@ function destroyHostedView(slug) {
 }
 
 // ---------- end foxy v5 tab-web scaffold ----------
+
+// Windows marks files downloaded from the internet with a Zone.Identifier
+// alternate data stream. Spawn fails with EACCES if the mark is present.
+function unblockExe(absPath) {
+  if (process.platform !== 'win32') return;
+  try { fs.unlinkSync(`${absPath}:Zone.Identifier`); } catch {}
+}
 
 function planFromPath(absPath) {
   if (/\.AppImage$/i.test(absPath)) return { cmd: absPath, args: [], kind: 'appimage' };
@@ -1908,12 +1918,15 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
   const nexusEnv = buildNexusEnv(slug, runId, appName, sockPath, openMode);
 
   const plan = planFromPath(info.path);
+  unblockExe(info.path);
   try {
+    const isWinExe = process.platform === 'win32' && plan.kind === 'exe';
     const child = spawn(plan.cmd, plan.args, {
       cwd: path.dirname(info.path),
       detached: true,
       stdio: 'ignore',
       env: { ...buildLaunchEnv(), ...nexusEnv },
+      ...(isWinExe && { shell: true, windowsHide: true }),
     });
 
     // Store child ref and capture pid immediately so fast-exiting processes
@@ -2249,6 +2262,7 @@ ipcMain.handle('cove:setCustomPath', async (_e, slug) => {
   if (process.platform !== 'win32') {
     try { fs.chmodSync(chosen, 0o755); } catch {}
   }
+  unblockExe(chosen);
   registerInstall(slug, { tag, path: chosen, source: 'adopted' });
   return { ok: true, path: chosen, tag };
 });
