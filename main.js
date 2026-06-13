@@ -1924,7 +1924,8 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
   unblockExe(info.path);
   try {
     const isWinExe = process.platform === 'win32' && plan.kind === 'exe';
-    const child = spawn(plan.cmd, plan.args, {
+    const shellCmd = isWinExe ? `"${plan.cmd}"` : plan.cmd;
+    const child = spawn(shellCmd, plan.args, {
       cwd: path.dirname(info.path),
       detached: true,
       stdio: ['ignore', 'ignore', 'pipe'],
