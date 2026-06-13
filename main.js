@@ -7,6 +7,7 @@ const os = require('node:os');
 const https = require('node:https');
 const net = require('node:net');
 const crypto = require('node:crypto');
+const { setupPortableMode } = require('./portable');
 
 const APP_ID = 'cove-nexus';
 const GITHUB_OWNER = 'Sin213';
@@ -22,7 +23,8 @@ const EXCLUDED_REPOS = new Set([]);
 // display name ("Cove Nexus"), which Electron would otherwise turn into
 // "~/.config/Cove Nexus/" with a space and capitals.
 app.setName('Cove Nexus');
-app.setPath('userData', path.join(app.getPath('appData'), APP_ID));
+const _isPortable = setupPortableMode();
+if (!_isPortable) app.setPath('userData', path.join(app.getPath('appData'), APP_ID));
 
 const USER_DATA = app.getPath('userData');
 const CONFIG_FILE = path.join(USER_DATA, 'config.json');
@@ -1448,6 +1450,7 @@ const LAUNCH_ENV_KEYS = new Set([
   'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY',
   'DBUS_SESSION_BUS_ADDRESS',
   'SHELL', 'TERM',
+  'PORTABLE_EXECUTABLE_DIR', 'PORTABLE_EXECUTABLE_FILE',
 ]);
 const LAUNCH_ENV_PREFIXES = ['XDG_', 'LC_', 'GTK_', 'QT_', 'GDK_', 'KDE_'];
 function buildLaunchEnv() {
