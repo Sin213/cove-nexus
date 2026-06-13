@@ -273,6 +273,7 @@ app.whenReady().then(() => {
   migrateRenamedSlugs();
   ensureProgramsRoot();
   adoptFromProgramsRoot();
+  cleanupStalePrograms();
   const cfg = readConfig();
   applyLoginItem(cfg);
   setupTray();
@@ -520,6 +521,31 @@ function forgetInstall(slug) {
   const reg = readRegistry();
   delete reg[slug];
   writeRegistry(reg);
+}
+
+// ---------- stale file cleanup ----------
+
+// After an update, the old versioned exe/AppImage may still exist if the
+// program was running at update time (Windows locks running exes). Sweep
+// the programs root on boot and delete any file that matches a cove-*
+// artifact pattern but is NOT the path recorded in the registry.
+function cleanupStalePrograms() {
+  const reg = readRegistry();
+  const root = readConfig().programsRoot;
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
+  const registeredPaths = new Set(
+    Object.values(reg).map(e => e?.path).filter(Boolean).map(p => path.resolve(p)),
+  );
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    if (entry.name.startsWith('.')) continue;
+    const slug = detectSlugFromFilename(entry.name);
+    if (!slug) continue;
+    const fullPath = path.resolve(path.join(root, entry.name));
+    if (registeredPaths.has(fullPath)) continue;
+    try { fs.unlinkSync(fullPath); } catch {}
+  }
 }
 
 // ---------- asset naming ----------
