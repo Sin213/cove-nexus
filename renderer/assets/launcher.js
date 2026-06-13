@@ -1796,9 +1796,20 @@
         const snapshot = await coveAPI.processList();
         if (snapshot && typeof snapshot === 'object') state.processes = snapshot;
       } catch {}
-      coveAPI.onProcessUpdate(({ slug, state: s } = {}) => {
+      coveAPI.onProcessUpdate(({ slug, previousStatus, state: s } = {}) => {
         if (slug && s && typeof s === 'object') {
           state.processes[slug] = s;
+
+          // Detect immediate crash: process went from launching/running to
+          // exited with a non-zero code within 5 seconds of starting.
+          if (s.status === 'exited' && (previousStatus === 'launching' || previousStatus === 'running')
+              && s.exitCode != null && s.exitCode !== 0
+              && s.startedAt && (Date.now() - s.startedAt < 5000)) {
+            const prog = (window.PROGRAMS || []).find(p => p.slug === slug);
+            const name = prog?.name || slug;
+            const detail = s.lastError || `exit code ${s.exitCode}`;
+            toast(`${name} crashed on launch: ${detail}`, 'error');
+          }
 
           const notif = s?.protocol?.notification;
           if (notif && notif.ts && notif.ts !== state.lastNotifTs[slug]) {

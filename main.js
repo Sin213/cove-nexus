@@ -1924,10 +1924,23 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
     const child = spawn(plan.cmd, plan.args, {
       cwd: path.dirname(info.path),
       detached: true,
-      stdio: 'ignore',
+      stdio: ['ignore', 'ignore', 'pipe'],
       env: { ...buildLaunchEnv(), ...nexusEnv },
       ...(isWinExe && { shell: true, windowsHide: true }),
     });
+
+    // Capture stderr briefly so immediate failures (missing DLL, AV block,
+    // bad exit) surface a real message. Capped at 4 KB; pipe destroyed
+    // after 5 s so long-running children are not tethered to Nexus.
+    let stderrBuf = '';
+    if (child.stderr) {
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk) => {
+        if (stderrBuf.length < 4096) stderrBuf += chunk.slice(0, 4096 - stderrBuf.length);
+      });
+      const stderrTimer = setTimeout(() => { try { child.stderr.destroy(); } catch {} }, 5000);
+      child.stderr.once('close', () => clearTimeout(stderrTimer));
+    }
 
     // Store child ref and capture pid immediately so fast-exiting processes
     // still preserve lastKnownPid in the exited registry entry.
@@ -1940,12 +1953,14 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
       const prev = processRegistry.get(slug);
       if (!prev || prev.status === 'failed') return;
       const prevStatus = prev.status;
+      const errSnippet = stderrBuf.trim().split('\n').slice(0, 3).join(' | ');
       processRegistry.set(slug, {
         ...prev,
         child: null,
         status: 'exited',
         exitCode: code ?? null,
         signal: signal ?? null,
+        lastError: (code && code !== 0 && errSnippet) ? errSnippet : prev.lastError,
         exitedAt: Date.now(),
         processUpdatedAt: Date.now(),
       });
@@ -2002,6 +2017,40 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
         settled = true;
         const prev = processRegistry.get(slug);
         const prevStatus = prev?.status ?? null;
+
+        // Process died before the settle window - report as a failed launch
+        // so the renderer can show the real error instead of silently
+        // pretending it worked.
+        if (prev && (prev.status === 'exited' || prev.status === 'failed')) {
+          const code = prev.exitCode;
+          if (prev.lastError || (code != null && code !== 0)) {
+            resolve({ ok: false, error: prev.lastError || `Exited immediately (code ${code})` });
+            return;
+          }
+        }
+
+        // Verify the PID is actually alive. The exit event can lag behind
+        // the real process death, especially with shell:true on Windows
+        // where cmd.exe is the direct child. Signal 0 is a no-op probe.
+        const pid = child.pid;
+        if (pid && prev?.status === 'launching') {
+          try { process.kill(pid, 0); } catch {
+            const errMsg = stderrBuf.trim().split('\n').slice(0, 3).join(' | ');
+            processRegistry.set(slug, {
+              ...prev, child: null,
+              status: 'failed', pid,
+              lastError: errMsg || 'Process is not running (not found in system)',
+              exitedAt: Date.now(), processUpdatedAt: Date.now(),
+            });
+            broadcastProcessUpdate(slug, prevStatus);
+            cleanupSocketServer(slug);
+            destroyHostedView(slug);
+            clearTabReadyTimer(slug);
+            resolve({ ok: false, error: errMsg || 'Process is not running (not found in system)' });
+            return;
+          }
+        }
+
         // Only transition if still launching (process may have exited in <600ms).
         if (prev?.status === 'launching') {
           processRegistry.set(slug, {
@@ -2016,6 +2065,29 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
         if (readConfig().closeAfterLaunch && !readConfig().foxyMode && mainWindow) mainWindow.hide();
         resolve({ ok: true, kind: plan.kind });
       }, 600);
+
+      // Secondary liveness recheck. With shell:true on Windows, cmd.exe
+      // (the direct child) can survive past 600ms while the real program
+      // never started. Re-probe 2.5 s after launch to catch that case.
+      setTimeout(() => {
+        const cur = processRegistry.get(slug);
+        if (!cur || cur.runId !== runId || cur.status !== 'running') return;
+        const pid2 = cur.pid;
+        if (!pid2) return;
+        try { process.kill(pid2, 0); } catch {
+          const errMsg = stderrBuf.trim().split('\n').slice(0, 3).join(' | ');
+          const curStatus = cur.status;
+          processRegistry.set(slug, {
+            ...cur, child: null,
+            status: 'failed', lastError: errMsg || 'Process exited shortly after launch',
+            exitedAt: Date.now(), processUpdatedAt: Date.now(),
+          });
+          broadcastProcessUpdate(slug, curStatus);
+          cleanupSocketServer(slug);
+          destroyHostedView(slug);
+          clearTabReadyTimer(slug);
+        }
+      }, 2500);
     });
   } catch (err) {
     const prev = processRegistry.get(slug);
