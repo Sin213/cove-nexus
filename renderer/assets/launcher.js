@@ -1391,6 +1391,7 @@
       state.onDisk = new Set((s.installed || []).map(x => x.slug));
       state.manifests = {};
       state.remoteUpdates = new Set();
+      state.updated = {};
       state.rateLimitedUntil = s.rateLimitedUntil || 0;
       for (const row of s.installed || []) {
         if (row.manifest) state.manifests[row.slug] = row.manifest;
