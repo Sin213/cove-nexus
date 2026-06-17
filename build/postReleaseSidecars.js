@@ -354,6 +354,42 @@ async function replaceAsset({ release, owner, repo, token, assetName, data }) {
     console.log(`[post-release] checksums finalized. COVE_KEEP_DRAFT=1 - leaving ${tag} as draft.`);
     return;
   }
+
+  // Verify latest*.yml files are present on the draft before publishing.
+  // If missing, upload them from the local release directory.
+  const refreshedRelease = await findReleaseByTag({ owner, repo, tag, token });
+  const draftYmlAssets = (refreshedRelease.assets || []).filter(a =>
+    YML_PATTERNS.some(re => re.test(a.name))
+  );
+  const draftYmlNames = new Set(draftYmlAssets.map(a => a.name));
+  const missingYmls = ymlFiles.filter(n => !draftYmlNames.has(n));
+  if (missingYmls.length > 0) {
+    console.log(`  ! ${missingYmls.length} latest*.yml file(s) missing from draft, uploading...`);
+    for (const name of missingYmls) {
+      const data = fs.readFileSync(path.join(dir, name));
+      try {
+        await replaceAsset({ release: refreshedRelease, owner, repo, token, assetName: name, data });
+        console.log(`  + uploaded ${name}`);
+      } catch (err) {
+        console.error(`  x failed to upload ${name}: ${err.message}`);
+        console.error('[post-release] aborting. Release left as draft.');
+        process.exit(1);
+      }
+    }
+  }
+
+  // Final gate: re-check that yml files are on the release.
+  const finalRelease = missingYmls.length > 0
+    ? await findReleaseByTag({ owner, repo, tag, token })
+    : refreshedRelease;
+  const finalYmlCount = (finalRelease.assets || []).filter(a =>
+    YML_PATTERNS.some(re => re.test(a.name))
+  ).length;
+  if (finalYmlCount === 0) {
+    console.error('[post-release] no latest*.yml on draft after upload attempt. Refusing to publish.');
+    process.exit(1);
+  }
+
   try {
     await publishRelease({ owner, repo, releaseId: release.id, token });
     console.log(`[post-release] published ${tag}.`);

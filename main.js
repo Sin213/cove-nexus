@@ -534,16 +534,16 @@ function cleanupStalePrograms() {
   const root = readConfig().programsRoot;
   let entries = [];
   try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
-  const registeredPaths = new Set(
-    Object.values(reg).map(e => e?.path).filter(Boolean).map(p => path.resolve(p)),
-  );
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     if (entry.name.startsWith('.')) continue;
     const slug = detectSlugFromFilename(entry.name);
     if (!slug) continue;
     const fullPath = path.resolve(path.join(root, entry.name));
-    if (registeredPaths.has(fullPath)) continue;
+    const registered = reg[slug];
+    if (!registered || !registered.path) continue;
+    if (path.resolve(registered.path) === fullPath) continue;
+    if (!exists(registered.path)) continue;
     try { fs.unlinkSync(fullPath); } catch {}
   }
 }
@@ -555,10 +555,10 @@ function cleanupStalePrograms() {
 function assetPatternsForSlug(slug) {
   const esc = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return [
-    new RegExp(`^${esc}-(\\d[\\d.]*)-Portable\\.exe$`, 'i'),
-    new RegExp(`^${esc}-(\\d[\\d.]*)-Setup\\.exe$`, 'i'),
-    new RegExp(`^${esc}-(\\d[\\d.]*)-x86_64\\.AppImage$`, 'i'),
-    new RegExp(`^${esc}_(\\d[\\d.]*)_amd64\\.deb$`, 'i'),
+    new RegExp(`^${esc}-(\\d[\\d.]*)-Portable(?:_[a-f0-9]+)?\\.exe$`, 'i'),
+    new RegExp(`^${esc}-(\\d[\\d.]*)-Setup(?:_[a-f0-9]+)?\\.exe$`, 'i'),
+    new RegExp(`^${esc}-(\\d[\\d.]*)-x86_64(?:_[a-f0-9]+)?\\.AppImage$`, 'i'),
+    new RegExp(`^${esc}_(\\d[\\d.]*)_amd64(?:_[a-f0-9]+)?\\.deb$`, 'i'),
   ];
 }
 
@@ -617,7 +617,11 @@ function adoptFromProgramsRoot() {
     if (!slug) continue;
     const match = matchAsset(slug, entry.name);
     if (!match) continue;
-    if (reg[slug] && reg[slug].path && exists(reg[slug].path)) continue;
+    const existing = reg[slug];
+    if (existing && existing.path && exists(existing.path)) {
+      const curVer = (existing.tag || '').replace(/^v/, '');
+      if (!isNewerSemver(match.version, curVer)) continue;
+    }
     const fullPath = path.join(root, entry.name);
     unblockExe(fullPath);
     reg[slug] = {

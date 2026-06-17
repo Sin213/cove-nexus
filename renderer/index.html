@@ -249,7 +249,7 @@
   .sidebar-footer .who small { color: var(--text-faint); font-size: 0.65625rem; }
 
   /* Sidebar collapse button */
-  .sidebar-collapse { margin-top: auto; align-self: flex-start; all: unset; cursor: pointer; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 7px; color: var(--text-faint); transition: color 100ms, background 100ms; }
+  .sidebar-collapse { all: unset; cursor: pointer; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 7px; color: var(--text-faint); transition: color 100ms, background 100ms; flex-shrink: 0; margin-left: auto; }
   .sidebar-collapse:hover { color: var(--text); background: var(--surface); }
   .sidebar-collapse svg { width: 16px; height: 16px; display: block; }
 
@@ -962,6 +962,9 @@
         <div class="brand">
           <div class="mark" aria-hidden="true"><img src="assets/cove_icon.png" alt="" /></div>
           <div class="name">Cove Nexus<small id="brand-meta">—</small></div>
+          <button id="sidebar-collapse-btn" class="sidebar-collapse" title="Hide sidebar" aria-label="Hide sidebar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+          </button>
         </div>
 
         <div>
@@ -1000,10 +1003,6 @@
           </div>
         </div>
 
-
-        <button id="sidebar-collapse-btn" class="sidebar-collapse" title="Hide sidebar" aria-label="Hide sidebar">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
-        </button>
       </aside>
 
       <!-- Main -->
