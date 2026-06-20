@@ -136,6 +136,7 @@
       radial-gradient(900px 500px at -10% 100%, var(--bg-radial-2), transparent 60%),
       linear-gradient(180deg, var(--bg-grad-1), var(--bg-grad-2));
     background-attachment: fixed;
+    border: 4px solid rgba(255, 255, 255, 0.18);
   }
 
   .mono { font-family: 'Geist Mono', ui-monospace, monospace; }
@@ -921,6 +922,33 @@
      Security boundary: chrome-wrap/chrome padding would offset the native view from its trusted region. */
   body:has(main.main.tab-web-active) .chrome-wrap { padding: 0; }
   body:has(main.main.tab-web-active) .chrome { max-width: none; margin: 0; border: none; border-radius: 0; box-shadow: none; }
+  /* Invisible 6px-wide edge handles + 8px corners that catch mousedown on
+     the visible 4px border so the user can grab anywhere on the frame. */
+  .edge-handle {
+    position: fixed;
+    z-index: 50;
+    background: transparent;
+    -webkit-app-region: no-drag;
+  }
+  .edge-handle[data-edge="Top"]    { top: 0; left: 0; right: 0; height: 6px; cursor: ns-resize; }
+  .edge-handle[data-edge="Right"]  { top: 0; right: 0; bottom: 0; width: 6px; cursor: ew-resize; }
+  .edge-handle[data-edge="Bottom"] { bottom: 0; left: 0; right: 0; height: 6px; cursor: ns-resize; }
+  .edge-handle[data-edge="Left"]   { top: 0; left: 0; bottom: 0; width: 6px; cursor: ew-resize; }
+  .edge-handle.corner { width: 8px; height: 8px; }
+  .edge-handle[data-edge="TopLeft"]     { top: 0; left: 0; cursor: nwse-resize; }
+  .edge-handle[data-edge="TopRight"]    { top: 0; right: 0; cursor: nesw-resize; }
+  .edge-handle[data-edge="BottomLeft"]  { bottom: 0; left: 0; cursor: nesw-resize; }
+  .resize-grip {
+    position: fixed;
+    bottom: 0;
+    right: 0;
+    width: 14px;
+    height: 14px;
+    cursor: nwse-resize;
+    z-index: 51;
+    background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.18) 50%);
+    -webkit-app-region: no-drag;
+  }
 </style>
 </head>
 <body data-chrome="none" data-density="default">
@@ -1203,6 +1231,52 @@
     </div>
   </div>
 </div>
+
+<!-- Edge resize handles (overlay the 4px border for easier grabbing) -->
+<div class="edge-handle" data-edge="Top"></div>
+<div class="edge-handle" data-edge="Right"></div>
+<div class="edge-handle" data-edge="Bottom"></div>
+<div class="edge-handle" data-edge="Left"></div>
+<div class="edge-handle corner" data-edge="TopLeft"></div>
+<div class="edge-handle corner" data-edge="TopRight"></div>
+<div class="edge-handle corner" data-edge="BottomLeft"></div>
+<div class="resize-grip"></div>
+<script>
+  // 6px-wide edge handles + 8px corners. Resize + (for Left/Top) reposition
+  // via window.resizeTo / moveTo. SE corner falls back to BottomRight.
+  (function () {
+    function startResize(edge, e) {
+      e.preventDefault();
+      var startX = e.screenX, startY = e.screenY;
+      var startW = window.outerWidth, startH = window.outerHeight;
+      var startWinX = window.screenX, startWinY = window.screenY;
+      function onMove(e2) {
+        var dx = e2.screenX - startX, dy = e2.screenY - startY;
+        var newW = startW, newH = startH, newX = startWinX, newY = startWinY;
+        if (edge.indexOf('Left')   !== -1) { newW = startW - dx; newX = startWinX - dx; }
+        if (edge.indexOf('Right')  !== -1) { newW = startW + dx; }
+        if (edge.indexOf('Top')    !== -1) { newH = startH - dy; newY = startWinY - dy; }
+        if (edge.indexOf('Bottom') !== -1) { newH = startH + dy; }
+        if (newW < 200) newW = 200;
+        if (newH < 150) newH = 150;
+        window.resizeTo(newW, newH);
+        if (newX !== startWinX || newY !== startWinY) window.moveTo(newX, newY);
+      }
+      function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    }
+    document.querySelectorAll('.resize-grip, .edge-handle').forEach(function (el) {
+      el.addEventListener('mousedown', function (e) {
+        var edge = el.dataset.edge || 'BottomRight';
+        startResize(edge, e);
+      });
+    });
+  })();
+</script>
 
 <!-- Data & behavior -->
 <script src="assets/programs.js?v=3"></script>
