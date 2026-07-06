@@ -1,11 +1,10 @@
 // electron-builder afterAllArtifactBuild hook.
-// Writes a single `checksums-sha256.txt` in the release/ folder with one
-// sha256sum-compatible line per shippable artifact. Returns the path so
-// electron-builder uploads it alongside the binaries on publish=always.
+// Writes a per-artifact <name>.sha256 sidecar for each shippable binary.
+// Returns the sidecar paths so electron-builder uploads them alongside the
+// binaries on publish=always.
 //
-// `latest*.yml` are deliberately omitted here: electron-builder writes
-// auto-update metadata AFTER this hook returns. postReleaseSidecars.js
-// appends their hashes to the bundled file before publishing the draft.
+// `latest*.yml` are handled separately by postReleaseSidecars.js — electron-builder
+// writes auto-update metadata AFTER this hook returns.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -30,8 +29,8 @@ function sha256File(p) {
 }
 
 module.exports = async function afterAllArtifactBuild(buildResult) {
-  const lines = [];
   const failures = [];
+  const sidecars = [];
   let outDir = null;
 
   for (const artifact of buildResult.artifactPaths || []) {
@@ -40,8 +39,10 @@ module.exports = async function afterAllArtifactBuild(buildResult) {
     if (!outDir) outDir = path.dirname(artifact);
     try {
       const hex = await sha256File(artifact);
-      lines.push(`${hex}  ${base}`);
-      console.log(`  • checksum  ${base}`);
+      const sidecarPath = path.join(path.dirname(artifact), `${base}.sha256`);
+      fs.writeFileSync(sidecarPath, `${hex}  ${base}\n`, 'utf8');
+      sidecars.push(sidecarPath);
+      console.log(`  • ${base}.sha256`);
     } catch (err) {
       const msg = err?.message || String(err);
       console.error(`  ✗ checksum failed  file=${base}  err=${msg}`);
@@ -54,20 +55,5 @@ module.exports = async function afterAllArtifactBuild(buildResult) {
     throw new Error(`afterAllArtifactBuild: ${failures.length} checksum(s) failed: ${summary}`);
   }
 
-  if (!lines.length || !outDir) return [];
-
-  const bundle = path.join(outDir, 'checksums-sha256.txt');
-  fs.writeFileSync(bundle, lines.join('\n') + '\n', 'utf8');
-  console.log(`  • checksums-sha256.txt  (${lines.length} entries)`);
-
-  const sidecars = [];
-  for (const line of lines) {
-    const [hex, base] = line.split(/\s{2}/);
-    const sidecarPath = path.join(outDir, `${base}.sha256`);
-    fs.writeFileSync(sidecarPath, `${hex}  ${base}\n`, 'utf8');
-    sidecars.push(sidecarPath);
-    console.log(`  • ${base}.sha256`);
-  }
-
-  return [bundle, ...sidecars];
+  return sidecars;
 };

@@ -1,20 +1,16 @@
 #!/usr/bin/env node
 // Runs after both platform build jobs complete (in the finalize CI job).
-// Downloads the partial checksums-sha256.txt from the draft release (written
-// by afterAllArtifactBuild with binary hashes), appends checksums for the
-// latest*.yml auto-update metadata files, re-uploads the combined bundle,
-// and publishes the draft.
+// Writes a per-artifact <name>.sha256 sidecar for each latest*.yml file,
+// uploads them to the draft release, and publishes the draft.
 //
-// Why a separate step: electron-builder writes latest*.yml AFTER the
-// afterAllArtifactBuild hook returns, so those files don't exist at hook
-// time. In CI, each platform builds in its own job; the finalize job runs
-// after both complete and has the latest*.yml files available from the draft.
+// Binary artifact sidecars are already uploaded by afterAllArtifactBuild.js
+// during each platform build job. This script only handles latest*.yml files,
+// which electron-builder writes AFTER the hook returns.
 //
 // Safety model:
 //   * electron-publish defaults releaseType to 'draft' for the GitHub
 //     provider, so end users never see the release until we publish it.
 //   * We assert release.draft === true before touching anything.
-//   * Atomic asset replacement: upload temp name, delete old, rename.
 //   * Publish-the-draft is the last step. Any upstream failure leaves the
 //     release as a draft.
 //
@@ -134,18 +130,6 @@ async function findReleaseByTag({ owner, repo, tag, token }) {
   return match;
 }
 
-async function downloadReleaseAsset({ owner, repo, assetId, token }) {
-  return httpRequest({
-    method: 'GET',
-    url: `${API_BASE}/repos/${owner}/${repo}/releases/assets/${assetId}`,
-    headers: {
-      ...authHeaders(token),
-      'Accept': 'application/octet-stream',
-    },
-    expectedStatuses: [200],
-  });
-}
-
 async function deleteReleaseAsset({ owner, repo, assetId, token }) {
   return httpRequest({
     method: 'DELETE',
@@ -247,17 +231,20 @@ async function replaceAsset({ release, owner, repo, token, assetName, data }) {
     process.exit(1);
   }
 
-  // Hash local latest*.yml files.
-  const ymlLines = [];
+  // Hash each latest*.yml and write a local sidecar.
+  const sidecars = [];
   for (const name of ymlFiles) {
     const hex = await sha256File(path.join(dir, name));
-    ymlLines.push(`${hex}  ${name}`);
-    console.log(`  • checksum  ${name}`);
+    const sidecarName = `${name}.sha256`;
+    const sidecarPath = path.join(dir, sidecarName);
+    fs.writeFileSync(sidecarPath, `${hex}  ${name}\n`, 'utf8');
+    sidecars.push({ name: sidecarName, path: sidecarPath, data: Buffer.from(`${hex}  ${name}\n`, 'utf8') });
+    console.log(`  . ${sidecarName}`);
   }
 
   if (dryRun) {
-    console.log('[post-release] dry-run: would append to checksums-sha256.txt:');
-    ymlLines.forEach(l => console.log(`    ${l}`));
+    console.log('[post-release] dry-run: would upload sidecars:');
+    sidecars.forEach(s => console.log(`    ${s.name}`));
     return;
   }
 
@@ -272,7 +259,7 @@ async function replaceAsset({ release, owner, repo, token, assetName, data }) {
     process.exit(1);
   }
   const tag = `v${PKG.version}`;
-  console.log(`[post-release] finalizing checksums-sha256.txt for ${owner}/${repo}@${tag}...`);
+  console.log(`[post-release] uploading yml sidecars for ${owner}/${repo}@${tag}...`);
 
   let release;
   try {
@@ -290,104 +277,31 @@ async function replaceAsset({ release, owner, repo, token, assetName, data }) {
     process.exit(1);
   }
 
-  // Download the existing checksums-sha256.txt (uploaded by afterAllArtifactBuild
-  // via each platform build job). Both jobs write their own file; the second
-  // upload replaces the first. We download whatever is there and check for
-  // missing binaries - if one platform's checksums were overwritten, we
-  // re-download those assets and regenerate their hashes.
-  const checksumAsset = (release.assets || []).find(a => a.name === 'checksums-sha256.txt');
-  let existingLines = [];
-  if (checksumAsset) {
+  // Upload each yml sidecar.
+  for (const sidecar of sidecars) {
     try {
-      const buf = await downloadReleaseAsset({ owner, repo, assetId: checksumAsset.id, token });
-      existingLines = buf.toString('utf8').trim().split('\n').filter(Boolean);
-      console.log(`  • downloaded existing checksums-sha256.txt (${existingLines.length} entries)`);
+      await replaceAsset({ release, owner, repo, token, assetName: sidecar.name, data: sidecar.data });
+      console.log(`  up ${sidecar.name}`);
     } catch (err) {
-      console.warn(`  ! couldn't download existing checksums-sha256.txt: ${err.message}`);
-      console.warn('    will regenerate from release assets');
+      console.error(`  x ${sidecar.name}: ${err.message}`);
+      console.error('[post-release] aborting. Release left as draft.');
+      process.exit(1);
     }
   }
 
-  // Check for binary assets missing from the partial checksum file.
-  const BINARY_PATTERNS = [/-Setup\.exe$/i, /-Portable\.exe$/i, /\.AppImage$/i, /\.deb$/i, /\.blockmap$/i];
-  const binaryAssets = (release.assets || []).filter(a =>
-    BINARY_PATTERNS.some(re => re.test(a.name))
-  );
-  const existingNames = new Set(existingLines.map(l => l.split(/\s+/).pop()));
-  const missingBinaries = binaryAssets.filter(a => !existingNames.has(a.name));
-
-  if (missingBinaries.length > 0) {
-    console.log(`  • ${missingBinaries.length} binary asset(s) missing from partial checksums, downloading...`);
-    for (const asset of missingBinaries) {
-      try {
-        const buf = await downloadReleaseAsset({ owner, repo, assetId: asset.id, token });
-        const hex = crypto.createHash('sha256').update(buf).digest('hex');
-        existingLines.push(`${hex}  ${asset.name}`);
-        console.log(`  • checksum  ${asset.name} (downloaded)`);
-      } catch (err) {
-        console.error(`  ✗ couldn't download ${asset.name}: ${err.message}`);
-        console.error('[post-release] aborting. Release left as draft.');
-        process.exit(1);
-      }
-    }
-  }
-
-  // Combine binary + yml checksums into the final bundle.
-  const allLines = [...existingLines, ...ymlLines];
-  const combined = allLines.join('\n') + '\n';
-  console.log(`  • final checksums-sha256.txt: ${allLines.length} entries`);
-
-  try {
-    await replaceAsset({
-      release, owner, repo, token,
-      assetName: 'checksums-sha256.txt',
-      data: Buffer.from(combined, 'utf8'),
-    });
-    console.log('  ↑ uploaded checksums-sha256.txt');
-  } catch (err) {
-    console.error(`  ✗ checksums-sha256.txt: ${err.message}`);
-    console.error('[post-release] aborting. Release left as draft.');
+  // Verify latest*.yml are on the draft before publishing.
+  const refreshedRelease = await findReleaseByTag({ owner, repo, tag, token });
+  const draftYmlCount = (refreshedRelease.assets || []).filter(a =>
+    YML_PATTERNS.some(re => re.test(a.name))
+  ).length;
+  if (draftYmlCount === 0) {
+    console.error('[post-release] no latest*.yml on draft. Refusing to publish.');
     process.exit(1);
   }
 
   if (keepDraft) {
-    console.log(`[post-release] checksums finalized. COVE_KEEP_DRAFT=1 - leaving ${tag} as draft.`);
+    console.log(`[post-release] sidecars uploaded. COVE_KEEP_DRAFT=1 - leaving ${tag} as draft.`);
     return;
-  }
-
-  // Verify latest*.yml files are present on the draft before publishing.
-  // If missing, upload them from the local release directory.
-  const refreshedRelease = await findReleaseByTag({ owner, repo, tag, token });
-  const draftYmlAssets = (refreshedRelease.assets || []).filter(a =>
-    YML_PATTERNS.some(re => re.test(a.name))
-  );
-  const draftYmlNames = new Set(draftYmlAssets.map(a => a.name));
-  const missingYmls = ymlFiles.filter(n => !draftYmlNames.has(n));
-  if (missingYmls.length > 0) {
-    console.log(`  ! ${missingYmls.length} latest*.yml file(s) missing from draft, uploading...`);
-    for (const name of missingYmls) {
-      const data = fs.readFileSync(path.join(dir, name));
-      try {
-        await replaceAsset({ release: refreshedRelease, owner, repo, token, assetName: name, data });
-        console.log(`  + uploaded ${name}`);
-      } catch (err) {
-        console.error(`  x failed to upload ${name}: ${err.message}`);
-        console.error('[post-release] aborting. Release left as draft.');
-        process.exit(1);
-      }
-    }
-  }
-
-  // Final gate: re-check that yml files are on the release.
-  const finalRelease = missingYmls.length > 0
-    ? await findReleaseByTag({ owner, repo, tag, token })
-    : refreshedRelease;
-  const finalYmlCount = (finalRelease.assets || []).filter(a =>
-    YML_PATTERNS.some(re => re.test(a.name))
-  ).length;
-  if (finalYmlCount === 0) {
-    console.error('[post-release] no latest*.yml on draft after upload attempt. Refusing to publish.');
-    process.exit(1);
   }
 
   try {
@@ -395,7 +309,7 @@ async function replaceAsset({ release, owner, repo, token, assetName, data }) {
     console.log(`[post-release] published ${tag}.`);
   } catch (err) {
     console.error(`[post-release] couldn't publish ${tag}: ${err.message}`);
-    console.error('  checksums uploaded - publish the draft manually from the GitHub UI.');
+    console.error('  sidecars uploaded - publish the draft manually from the GitHub UI.');
     process.exit(1);
   }
 })().catch((err) => {
