@@ -8,6 +8,10 @@ const https = require('node:https');
 const net = require('node:net');
 const crypto = require('node:crypto');
 const { setupPortableMode } = require('./portable');
+const {
+  matchAsset, detectSlugFromFilename, isNewerSemver,
+  listArtifactsFromNames, planReconcile,
+} = require('./lib/reconcile');
 
 const APP_ID = 'cove-nexus';
 const GITHUB_OWNER = 'Sin213';
@@ -272,7 +276,7 @@ app.whenReady().then(() => {
   migrateLegacyInstalls();
   migrateRenamedSlugs();
   ensureProgramsRoot();
-  adoptFromProgramsRoot();
+  reconcilePrograms();
   cleanupStalePrograms();
   const cfg = readConfig();
   applyLoginItem(cfg);
@@ -364,17 +368,6 @@ function setupPortableUpdateNotifier() {
     win.webContents.once('did-finish-load', check);
   });
   setInterval(check, 60 * 60 * 1000);
-}
-
-function isNewerSemver(a, b) {
-  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
-  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const x = pa[i] || 0, y = pb[i] || 0;
-    if (x > y) return true;
-    if (x < y) return false;
-  }
-  return false;
 }
 
 app.on('window-all-closed', () => {
@@ -527,8 +520,10 @@ function forgetInstall(slug) {
 
 // After an update, the old versioned exe/AppImage may still exist if the
 // program was running at update time (Windows locks running exes). Sweep
-// the programs root on boot and delete any file that matches a cove-*
-// artifact pattern but is NOT the path recorded in the registry.
+// the programs root on boot and delete leftovers - but only for managed
+// installs, and never a file whose parsed version is NEWER than the
+// registered one: that is a self-updated binary reconcilePrograms()
+// should repoint to, and deleting it is never safe.
 function cleanupStalePrograms() {
   const reg = readRegistry();
   const root = readConfig().programsRoot;
@@ -542,41 +537,21 @@ function cleanupStalePrograms() {
     const fullPath = path.resolve(path.join(root, entry.name));
     const registered = reg[slug];
     if (!registered || !registered.path) continue;
+    if (registered.source !== 'managed') continue;
     if (path.resolve(registered.path) === fullPath) continue;
     if (!exists(registered.path)) continue;
+    const match = matchAsset(slug, entry.name);
+    if (!match) continue;
+    const regVer = String(registered.tag || '').replace(/^v/, '');
+    if (isNewerSemver(match.version, regVer)) continue;
     try { fs.unlinkSync(fullPath); } catch {}
   }
 }
 
 // ---------- asset naming ----------
 
-// electron-builder uses different casings per platform. Case-insensitive
-// matching handles: cove-video-editor, Cove-Video-Editor, Cove-GIF-Maker.
-function assetPatternsForSlug(slug) {
-  const esc = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return [
-    new RegExp(`^${esc}-(\\d[\\d.]*)-Portable(?:_[a-f0-9]+)?\\.exe$`, 'i'),
-    new RegExp(`^${esc}-(\\d[\\d.]*)-Setup(?:_[a-f0-9]+)?\\.exe$`, 'i'),
-    new RegExp(`^${esc}-(\\d[\\d.]*)-x86_64(?:_[a-f0-9]+)?\\.AppImage$`, 'i'),
-    new RegExp(`^${esc}_(\\d[\\d.]*)_amd64(?:_[a-f0-9]+)?\\.deb$`, 'i'),
-  ];
-}
-
-function matchAsset(slug, filename) {
-  for (const re of assetPatternsForSlug(slug)) {
-    const m = filename.match(re);
-    if (m) return { version: m[1] };
-  }
-  return null;
-}
-
-// Extract a cove-* slug from a release-artifact filename without knowing
-// the slug in advance. Used by adoption when walking arbitrary folders.
-function detectSlugFromFilename(name) {
-  const m = name.match(/^(cove(?:[-_][a-z0-9]+)+)(?:[-_.])(\d[\d.]*)[-_.]/i);
-  if (!m) return null;
-  return m[1].toLowerCase().replace(/_/g, '-');
-}
+// matchAsset / detectSlugFromFilename / isNewerSemver live in lib/reconcile.js
+// (kept electron-free so node --test can exercise them).
 
 // Ordered regexes — first asset whose name matches wins. Preference is
 // Portable.exe on Windows (Cove Nexus fully manages these, no installer
@@ -599,39 +574,43 @@ function pickAsset(assets) {
   return null;
 }
 
-// ---------- adoption ----------
+// ---------- reconciliation (adoption + self-update detection) ----------
 
-// Walk the programs root and adopt any file whose name matches a cove-*
-// release artifact that isn't already in the registry. Runs on boot and
-// on every scan, so files added between runs are picked up.
-function adoptFromProgramsRoot() {
+// Walk the programs root and reconcile the registry against what is
+// actually on disk. Covers plain adoption (new file, no entry) plus the
+// two self-update shapes: electron-updater deletes the old AppImage and
+// writes a new versioned filename (registered path goes dead), and the
+// Python fleet installs updates under the new versioned filename next to
+// the old one. Repointing preserves source/pinnedTag/lastKnownLatestTag;
+// older duplicates are deleted only for managed installs.
+// Runs on boot, on every scan, and before installs.
+// Returns the Map<slug, artifacts> so callers can make pruning decisions.
+function reconcilePrograms() {
   const root = readConfig().programsRoot;
   let entries = [];
-  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); }
+  catch { return new Map(); }
+  const names = entries.filter(e => e.isFile()).map(e => e.name);
+  const bySlug = listArtifactsFromNames(names, (name) => path.join(root, name));
+
   const reg = readRegistry();
   let changed = false;
-
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    const slug = detectSlugFromFilename(entry.name);
-    if (!slug) continue;
-    const match = matchAsset(slug, entry.name);
-    if (!match) continue;
-    const existing = reg[slug];
-    if (existing && existing.path && exists(existing.path)) {
-      const curVer = (existing.tag || '').replace(/^v/, '');
-      if (!isNewerSemver(match.version, curVer)) continue;
+  for (const [slug, artifacts] of bySlug) {
+    const plan = planReconcile(slug, artifacts, reg[slug], exists);
+    if (plan.changed || !reg[slug]) {
+      unblockExe(plan.entry.path);
+      if (process.platform !== 'win32') {
+        try { fs.chmodSync(plan.entry.path, 0o755); } catch {}
+      }
+      reg[slug] = plan.entry;
+      changed = true;
     }
-    const fullPath = path.join(root, entry.name);
-    unblockExe(fullPath);
-    reg[slug] = {
-      tag: `v${match.version}`,
-      path: fullPath,
-      source: 'adopted',
-    };
-    changed = true;
+    for (const p of plan.deletions) {
+      try { fs.unlinkSync(p); } catch {}
+    }
   }
   if (changed) writeRegistry(reg);
+  return bySlug;
 }
 
 // ---------- legacy migration from ~/.cove-suite/ ----------
@@ -917,6 +896,10 @@ async function installOrUpdate(slug, { force = false, tag: explicitTag } = {}) {
     throw new Error(`No ${plat} build available in release ${tag || '(unknown)'}.`);
   }
 
+  // Reconcile first so the already-installed short-circuit and the
+  // managed old-file deletion below operate on the real on-disk state,
+  // not a registry left stale by an app's own self-update.
+  reconcilePrograms();
   const reg = readRegistry();
   const current = reg[slug];
   const root = ensureProgramsRoot();
@@ -1589,6 +1572,10 @@ async function scanOneInstalled(slug, info) {
     manifest: null,
     installed: true,
     source: info.source || 'managed',
+    // info.tag is kept accurate by reconcilePrograms(). One legacy case is
+    // unfixable from disk: installs the old Python updater already updated
+    // in place have a stale filename with newer content - unknowable here;
+    // self-heals on the next update.
     version: info.tag || '',
     latestTag: effectiveLatest,
     hasUpdate,
@@ -1697,7 +1684,7 @@ ipcMain.handle('cove:config:setProgramsRoot', async () => {
   try {
     fs.mkdirSync(next, { recursive: true });
     writeConfig({ ...cfg, programsRoot: next });
-    adoptFromProgramsRoot();
+    reconcilePrograms();
     return { ok: true, programsRoot: next };
   } catch (err) {
     return { ok: false, error: String(err?.message || err) };
@@ -1724,15 +1711,17 @@ ipcMain.handle('cove:getState', async () => ({
 }));
 
 ipcMain.handle('cove:scan', async (_e, opts = {}) => {
-  adoptFromProgramsRoot();
+  const artifactsBySlug = reconcilePrograms();
   const checkUpdates = opts.checkUpdates !== false;
   const reg = readRegistry();
 
   // Prune registry entries whose file has vanished, so the UI flips them
   // back to "not installed" instead of showing a phantom launch button.
+  // Only prune when the slug has NO artifact on disk at all - if one
+  // exists, reconcile owns it and pruning would flash "not installed".
   let pruned = false;
   for (const [slug, info] of Object.entries(reg)) {
-    if (info?.path && !exists(info.path)) {
+    if (info?.path && !exists(info.path) && !(artifactsBySlug.get(slug)?.length)) {
       delete reg[slug];
       pruned = true;
     }
