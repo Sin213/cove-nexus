@@ -1,6 +1,6 @@
 {
   "name": "cove-nexus",
-  "version": "2.3.3",
+  "version": "2.3.4",
   "description": "The Cove Nexus — install, launch, and update every Cove tool from a single window.",
   "main": "main.js",
   "author": {
@@ -37,6 +37,7 @@
       "portable.js",
       "preload.js",
       "renderer/**/*",
+      "lib/**/*",
       "package.json"
     ],
     "publish": [

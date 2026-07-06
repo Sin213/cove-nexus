@@ -59,5 +59,15 @@ module.exports = async function afterAllArtifactBuild(buildResult) {
   const bundle = path.join(outDir, 'checksums-sha256.txt');
   fs.writeFileSync(bundle, lines.join('\n') + '\n', 'utf8');
   console.log(`  • checksums-sha256.txt  (${lines.length} entries)`);
-  return [bundle];
+
+  const sidecars = [];
+  for (const line of lines) {
+    const [hex, base] = line.split(/\s{2}/);
+    const sidecarPath = path.join(outDir, `${base}.sha256`);
+    fs.writeFileSync(sidecarPath, `${hex}  ${base}\n`, 'utf8');
+    sidecars.push(sidecarPath);
+    console.log(`  • ${base}.sha256`);
+  }
+
+  return [bundle, ...sidecars];
 };
