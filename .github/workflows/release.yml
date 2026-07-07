@@ -9,8 +9,7 @@ name: Release
 # default for the GitHub provider). Each build job uploads its artifacts'
 # .sha256 sidecars via afterAllArtifactBuild.js. The finalize job runs
 # after both builds: it downloads latest*.yml metadata from the draft,
-# uploads their sidecars, backfills any missing binary sidecars, removes a
-# legacy bundled checksums-sha256.txt if present, and promotes the draft.
+# uploads their .sha256 sidecars, and promotes the draft.
 
 on:
   push:
