@@ -925,13 +925,13 @@ async function installOrUpdate(slug, { force = false, tag: explicitTag } = {}) {
     throw err;
   }
 
-  // Optional checksum verification - looks for a bundled checksums-sha256.txt
-  // on the release, then finds the line matching this asset. Falls back to a
-  // per-asset <name>.sha256 sidecar for older releases. Absent - skip silently;
-  // mismatch - abort.
-  const bundleAsset = (release.assets || []).find(a => a?.name === 'checksums-sha256.txt');
-  const sidecarAsset = !bundleAsset && (release.assets || []).find(a => a?.name === `${asset.name}.sha256`);
-  const shaSource = bundleAsset || sidecarAsset;
+  // Optional checksum verification - looks for a per-asset <name>.sha256
+  // sidecar on the release (fleet policy: one sidecar per artifact). Falls
+  // back to a bundled checksums-sha256.txt on older releases, finding the
+  // line matching this asset. Absent - skip silently; mismatch - abort.
+  const sidecarAsset = (release.assets || []).find(a => a?.name === `${asset.name}.sha256`);
+  const bundleAsset = !sidecarAsset && (release.assets || []).find(a => a?.name === 'checksums-sha256.txt');
+  const shaSource = sidecarAsset || bundleAsset;
   if (shaSource) {
     sendProgress(slug, { phase: 'verify' });
     try {

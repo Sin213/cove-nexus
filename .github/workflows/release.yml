@@ -2,14 +2,15 @@ name: Release
 
 # Tag-driven release. Push a tag of the form `v*` (e.g. v2.0.7) and this
 # workflow builds the AppImage + .deb on Linux, the NSIS Setup.exe + Portable.exe
-# on Windows, publishes a single bundled `checksums-sha256.txt` covering all
-# shipping artifacts + auto-update metadata, and publishes the GitHub Release.
+# on Windows, publishes one `<artifact>.sha256` sidecar per shipping artifact
+# plus sidecars for the auto-update metadata, and publishes the GitHub Release.
 #
 # The release is created as a draft by both build jobs (electron-publish's
-# default for the GitHub provider). Each build job uploads a partial
-# checksums-sha256.txt via afterAllArtifactBuild.js. The finalize job runs
+# default for the GitHub provider). Each build job uploads its artifacts'
+# .sha256 sidecars via afterAllArtifactBuild.js. The finalize job runs
 # after both builds: it downloads latest*.yml metadata from the draft,
-# merges all checksums into one file, re-uploads it, and promotes the draft.
+# uploads their sidecars, backfills any missing binary sidecars, removes a
+# legacy bundled checksums-sha256.txt if present, and promotes the draft.
 
 on:
   push:
@@ -73,7 +74,7 @@ jobs:
         run: npx electron-builder --win --publish=always
 
   finalize:
-    name: Finalize checksums + publish draft
+    name: Finalize sidecars + publish draft
     needs: [build-linux, build-windows]
     runs-on: ubuntu-latest
     steps:
@@ -88,7 +89,7 @@ jobs:
           node-version: 20
 
       # Download latest*.yml so postReleaseSidecars.js can hash them and
-      # append to the bundled checksums-sha256.txt before publishing.
+      # upload their .sha256 sidecars before publishing.
       - name: Download auto-update metadata from draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -106,7 +107,7 @@ jobs:
             --skip-existing
           ls -la release
 
-      - name: Finalize checksums + promote draft
+      - name: Finalize sidecars + promote draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node build/postReleaseSidecars.js
