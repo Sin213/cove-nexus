@@ -309,8 +309,62 @@ function isWindowsPortable() {
   return process.platform === 'win32' && !!process.env.PORTABLE_EXECUTABLE_FILE;
 }
 
+// Custom AppImage update install (issue #5).
+//
+// electron-updater's built-in AppImageUpdater.doInstall() finishes an update
+// by launching the new AppImage via execFileSync. When AppImageLauncher is
+// installed it intercepts that exec (binfmt handler), the child exits before
+// the handshake completes, and Node throws EPIPE - the update silently never
+// happens. electron-updater is still used for detection and download (it
+// verifies the sha512 from latest-linux.yml during download); this replaces
+// only the install step: swap the file on disk in place.
+//
+// The running process keeps the old inode (rename is atomic), the
+// AppImageLauncher shortcut keeps pointing at the same path, and the new
+// version takes effect on the next launch. No child process is spawned, so
+// there is nothing for AppImageLauncher to intercept.
+function fsyncPath(p) {
+  const fd = fs.openSync(p, 'r');
+  try { fs.fsyncSync(fd); }
+  finally { fs.closeSync(fd); }
+}
+
+function installAppImageUpdate(downloadedFile, appImagePath) {
+  const dir = path.dirname(appImagePath);
+  // Unpredictable staging name + exclusive create: COPYFILE_EXCL fails if
+  // anything (including a planted symlink) already sits at the staging path,
+  // so the updater only ever writes a file it created itself.
+  const staging = path.join(
+    dir,
+    `.${path.basename(appImagePath)}.update-${crypto.randomBytes(8).toString('hex')}`
+  );
+  // Copy into the target directory first: the updater cache may live on a
+  // different filesystem, and rename() across mounts fails with EXDEV. A
+  // same-directory rename is atomic, so the AppImage path always holds
+  // either the complete old or the complete new file.
+  try {
+    fs.copyFileSync(downloadedFile, staging, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(staging, 0o755);
+    // Make the staged contents durable before the swap, and the rename
+    // durable after it, so a crash or power loss can't leave the AppImage
+    // path pointing at an incomplete replacement after we report success.
+    fsyncPath(staging);
+    fs.renameSync(staging, appImagePath);
+  } catch (err) {
+    try { fs.unlinkSync(staging); } catch { /* best effort */ }
+    throw err;
+  }
+  // The rename is committed; a failed directory flush is a durability risk,
+  // not a failed install, so it must not be reported as one.
+  try { fsyncPath(dir); }
+  catch (err) { console.warn('[cove-updater] directory fsync failed:', err?.message || err); }
+  try { fs.unlinkSync(downloadedFile); } catch { /* cache cleanup, best effort */ }
+}
+
 // Silent auto-update: packaged builds only. Checks on boot and hourly.
-// When an update is downloaded, the app relaunches itself immediately.
+// When an update is downloaded, the app relaunches itself immediately
+// (Windows NSIS), or the AppImage is swapped in place and the new version
+// takes effect on next launch (Linux, see installAppImageUpdate above).
 // No prompt. No toast. Configured against github.com/Sin213/cove-nexus releases.
 function setupAutoUpdater() {
   if (!app.isPackaged) return;
@@ -319,10 +373,22 @@ function setupAutoUpdater() {
   try { ({ autoUpdater } = require('electron-updater')); }
   catch { return; }
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.on('update-downloaded', () => {
-    try { autoUpdater.quitAndInstall(true, true); } catch {}
-  });
+  const appImagePath = process.platform === 'linux' ? process.env.APPIMAGE : '';
+  if (appImagePath) {
+    // Keep autoInstallOnAppQuit off so electron-updater's broken doInstall
+    // path (the EPIPE source) can never run on quit.
+    autoUpdater.autoInstallOnAppQuit = false;
+    autoUpdater.on('update-downloaded', (info) => {
+      try { installAppImageUpdate(info.downloadedFile, appImagePath); }
+      catch (err) { console.error('[cove-updater] install failed:', err?.message || err); }
+    });
+  } else {
+    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.on('update-downloaded', () => {
+      try { autoUpdater.quitAndInstall(true, true); }
+      catch (err) { console.error('[cove-updater] quitAndInstall failed:', err?.message || err); }
+    });
+  }
   autoUpdater.on('error', (err) => {
     // Logged only — we intentionally don't surface update failures to the UI.
     console.error('[cove-updater]', err?.message || err);
