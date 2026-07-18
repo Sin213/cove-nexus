@@ -44,6 +44,9 @@ Two options from the [Releases](https://github.com/Sin213/cove-nexus/releases/la
 - **One-window launcher** for every Cove tool — no hunting for AppImages or `.exe`s.
 - **Foxy Mode** — supported tools open as a tab inside Nexus instead of a separate window. The card swaps **Launch** for **Running** while it's open; clicking **Running** focuses the existing tab instead of spawning a duplicate. Cove Meme Maker is the first tool to ship with Foxy Mode; everything else launches standalone as usual.
 - **Auto-discovery from GitHub** — any `cove-*` repo on the account shows up automatically (`cove-*-bot` repos are filtered out).
+- **Views + categories** - filter the grid by All / Installed / Updates / Not Installed, or by category tab (Media, Documents, Utilities, Create).
+- **Bookmarks** - star any tool and it joins a dedicated Bookmarks view for one-click access to your favorites.
+- **Drag-to-reorder** - drag cards to arrange the grid your way; your order sticks and works in every view.
 - **Install / launch / update** — each tool is a single click, with a live progress bar showing download bytes and verification status.
 - **Per-tool release notes** — the latest version and a short changelog preview sit on every card, fetched live from GitHub.
 - **Optional SHA-256 verification** — when a release ships a `<asset>.sha256` companion, Cove Nexus downloads and verifies before replacing the old binary. Missing → skipped.
@@ -53,7 +56,8 @@ Two options from the [Releases](https://github.com/Sin213/cove-nexus/releases/la
 - **Silent self-updates** — the launcher itself updates in the background from GitHub releases and relaunches seamlessly (Setup.exe + AppImage). Portable users get a one-click in-app banner.
 - **Pin + unpin versions** — choose a specific tag for any tool and stay on it until you unpin; updates won't override your choice.
 - **GitHub rate-limit aware** — transparent 5-minute cache, `X-RateLimit-*` backoff, optional PAT in Settings bumps the limit from 60/hr to 5000/hr.
-- **Themeable** — seven accent colors, three densities, two chrome modes (`Ctrl+,` for the Tweaks panel).
+- **Themeable** — light + dark themes, seven accent colors, three densities, two chrome modes (`Ctrl+,` for the Tweaks panel).
+- **UI zoom** - `Ctrl/Cmd +` / `-` / `0` scales the whole interface up, down, or back to default.
 - **Cross-platform** — Linux AppImage, Windows NSIS installer, Windows portable `.exe`.
 
 ---
@@ -96,11 +100,12 @@ The Windows **Portable** build is the one exception — `electron-updater` can't
 
 ## Built-in programs
 
-The static registry includes these nine tools by default. Any other `cove-*` repo on the Sin213 account is auto-discovered.
+The static registry includes these ten tools by default. Any other `cove-*` repo on the Sin213 account is auto-discovered.
 
 | Tool | What it does |
 |---|---|
-| [cove-upscaler](https://github.com/Sin213/cove-upscaler) | AI image/video upscaler (Real-ESRGAN) |
+| [cove-narrator](https://github.com/Sin213/cove-narrator) | Offline text-to-speech with voice blending and document reading |
+| [cove-image-upscaler](https://github.com/Sin213/cove-image-upscaler) | Offline image upscaler for photos and anime (NCNN Vulkan) |
 | [cove-video-downloader](https://github.com/Sin213/cove-video-downloader) | Downloads from YouTube, Twitter, TikTok, etc. |
 | [cove-compressor](https://github.com/Sin213/cove-compressor) | Shrinks video, images, and PDFs |
 | [cove-universal-converter](https://github.com/Sin213/cove-universal-converter) | One converter for every file format |
@@ -149,6 +154,8 @@ build/
 | Key | Action |
 |---|---|
 | `Ctrl+,` | Toggle Tweaks panel |
+| `Ctrl/Cmd +` / `-` | Zoom UI in / out |
+| `Ctrl/Cmd 0` | Reset UI zoom |
 | `Esc` | Close Tweaks panel / settings modal |
 
 ---
