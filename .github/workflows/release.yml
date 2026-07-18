@@ -112,12 +112,13 @@ jobs:
         run: node build/postReleaseSidecars.js
 
       # postReleaseSidecars.js publishes the draft but doesn't set the
-      # release body. Do it in CI so
-      # `.release-notes-vX.Y.Z.md` becomes the canonical source of the
-      # GitHub release description. Also normalise the release name to
-      # match prior releases ("2.0.7", not "v2.0.7"). No-op if the notes
-      # file is absent so a hotfix without notes still ships.
-      - name: Set release body + name from notes file
+      # release body. Do it in CI. The annotated tag message is the
+      # canonical source of the release notes (no notes file committed to
+      # the repo). If the tag is lightweight or has an empty message, fall
+      # back to GitHub's auto-generated notes so every release still ships
+      # a changelog. Also normalise the release name to match prior
+      # releases ("2.0.7", not "v2.0.7").
+      - name: Set release body + name
         if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -125,13 +126,22 @@ jobs:
           set -euo pipefail
           TAG="${{ inputs.tag || github.ref_name }}"
           NAME="${TAG#v}"
-          NOTES_FILE=".release-notes-${TAG}.md"
-          if [ -f "$NOTES_FILE" ]; then
-            echo "Setting body from $NOTES_FILE and name to $NAME"
+          # actions/checkout dereferences tags; refetch so the annotation
+          # is available locally.
+          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          NOTES="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents)')"
+          if [ "$(git cat-file -t "refs/tags/${TAG}")" = "tag" ] && [ -n "$NOTES" ]; then
+            echo "Setting body from annotation of tag $TAG"
             gh release edit "$TAG" \
               --repo "${{ github.repository }}" \
               --title "$NAME" \
-              --notes-file "$NOTES_FILE"
+              --notes "$NOTES"
           else
-            echo "No $NOTES_FILE found — leaving release body unchanged."
+            echo "No tag annotation - using auto-generated notes"
+            BODY="$(gh api "repos/${{ github.repository }}/releases/generate-notes" \
+              -f tag_name="$TAG" --jq .body)"
+            gh release edit "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "$NAME" \
+              --notes "$BODY"
           fi
