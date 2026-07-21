@@ -23,7 +23,7 @@
     "js-yaml": "^4.3.0"
   },
   "devDependencies": {
-    "electron": "^33.4.11",
+    "electron": "^43.1.1",
     "electron-builder": "^26.9.0",
     "eslint": "^9.0.0"
   },
@@ -94,6 +94,6 @@
     }
   },
   "allowScripts": {
-    "electron@33.4.11": true
+    "electron@43.1.1": true
   }
 }
