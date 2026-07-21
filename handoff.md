@@ -81,11 +81,17 @@ CVE is fixed via an override. The Electron CVE is the one item NOT auto-applied
   the policy.
 - `npm install --package-lock-only` + `npm audit`: js-yaml advisory cleared.
 
-## Deferred (with reason)
-- Electron CVE (electron <=39.8.4): NOT auto-applied. Current 33.4.11 is EOL with
-  no patched release, so the fix is a 6+ major jump to a supported line
-  (39.8.10+ / 43.x) that removes/changes APIs this app uses (e.g. BrowserView).
-  It cannot be verified in this headless environment and needs a supervised
-  upgrade with real GUI regression testing on Windows + Linux.
-- `brace-expansion` advisory: dev/build-tooling only (electron-builder + eslint),
-  ships in no runtime artifact, and was not among the audit findings in scope.
+## Electron upgrade (branch: chore/electron-upgrade)
+- electron `^33.4.11` -> `^43.1.1` (33 is EOL; 43.x is latest stable and clears
+  the `electron <=39.8.4` advisory). `allowScripts` pin updated to 43.1.1.
+- API-surface check: the app already uses the modern `WebContentsView` /
+  `contentView.addChildView` (not the removed `BrowserView`), plus standard
+  `BrowserWindow`/`Tray`/`safeStorage`, `contextIsolation:true`,
+  `nodeIntegration:false` — all current in 43. No removed APIs in use.
+- `npm install` succeeds; `electron --version` -> v43.1.1.
+- `npm audit --omit=dev` -> 0 vulnerabilities (runtime deps clean). Remaining
+  advisories (brace-expansion, tar, undici, form-data, tmp) are all under
+  electron-builder / eslint dev tooling and ship in no runtime artifact.
+- STILL REQUIRES manual GUI regression testing on Windows + Linux before merge:
+  window chrome/resize, install/launch/update a program, hosted WebContentsView
+  panes, tray, and auto-update. Headless rendering can't be verified here.
