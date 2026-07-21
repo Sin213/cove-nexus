@@ -531,19 +531,39 @@ function readConfig() {
   };
 }
 
-function writeConfig(c) {
+// tokenAuthoritative: set only by the token setter, where an empty token means
+// "clear it". Every other caller passes the token round-tripped from readConfig,
+// which is '' whenever decryption was unavailable — so for those we must not
+// treat '' as an intentional clear.
+function writeConfig(c, { tokenAuthoritative = false } = {}) {
   fs.mkdirSync(USER_DATA, { recursive: true });
   const { githubToken, ...rest } = c || {};
-  const tokenFields = encodeToken(githubToken || '');
+  let tokenFields = encodeToken(githubToken || '');
+  // If encryption is unavailable (e.g. the OS keyring is locked) and this is
+  // not an explicit token write, preserve any existing encrypted token instead
+  // of wiping it — otherwise saving an unrelated preference would erase it.
+  if (!githubToken && !tokenAuthoritative && !canEncryptTokens()) {
+    try {
+      const prior = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+      if (typeof prior?.githubTokenEnc === 'string' && prior.githubTokenEnc) {
+        tokenFields = { githubTokenEnc: prior.githubTokenEnc, githubToken: '' };
+      }
+    } catch {}
+  }
   const out = { ...rest, ...tokenFields };
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(out, null, 2), 'utf8');
+  // Atomic write: a crash mid-write must not leave truncated JSON that
+  // readConfig would silently discard (losing token + prefs).
+  const tmp = `${CONFIG_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(out, null, 2), 'utf8');
   // Lock the file down on POSIX even when encrypted — the rest of the
   // config (programsRoot, prefs) doesn't need world-read either, and on
   // Linux without a keyring we fall back to plaintext, so 0600 is load-
-  // bearing in that path.
+  // bearing in that path. Set the mode before the rename so there is no
+  // window where the final file is world-readable.
   if (process.platform !== 'win32') {
-    try { fs.chmodSync(CONFIG_FILE, 0o600); } catch {}
+    try { fs.chmodSync(tmp, 0o600); } catch {}
   }
+  fs.renameSync(tmp, CONFIG_FILE);
 }
 
 function ensureProgramsRoot() {
@@ -566,7 +586,11 @@ function readRegistry() {
 
 function writeRegistry(reg) {
   fs.mkdirSync(USER_DATA, { recursive: true });
-  fs.writeFileSync(INSTALLS_FILE, JSON.stringify(reg, null, 2), 'utf8');
+  // Atomic write: a torn registry file would otherwise be read back as {} and
+  // drop every install record.
+  const tmp = `${INSTALLS_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(reg, null, 2), 'utf8');
+  fs.renameSync(tmp, INSTALLS_FILE);
   _registryCache = reg;
 }
 
@@ -621,13 +645,15 @@ function cleanupStalePrograms() {
 
 // Ordered regexes — first asset whose name matches wins. Preference is
 // Portable.exe on Windows (Cove Nexus fully manages these, no installer
-// wizard flash) and x86_64.AppImage on Linux.
+// wizard flash) and x86_64.AppImage on Linux. .deb is intentionally excluded:
+// Nexus runs a managed binary directly, but a .deb is a system package with no
+// runnable target, so "launching" it only reopens the package installer.
 function assetPreferencesForPlatform() {
   if (process.platform === 'win32') {
     return [/-Portable\.exe$/i, /-Setup\.exe$/i, /\.exe$/i];
   }
   if (process.platform === 'linux') {
-    return [/x86_64\.AppImage$/i, /\.AppImage$/i, /amd64\.deb$/i];
+    return [/x86_64\.AppImage$/i, /\.AppImage$/i];
   }
   return [];
 }
@@ -766,14 +792,14 @@ function isLegacyClone(slug) {
 
 // ---------- https ----------
 
-function ghHeaders() {
+function ghHeaders(noAuth = false) {
   const h = {
     'User-Agent': UA,
     'Accept': 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
   };
   const tok = readConfig().githubToken;
-  if (tok) h.Authorization = `Bearer ${tok}`;
+  if (tok && !noAuth) h.Authorization = `Bearer ${tok}`;
   return h;
 }
 
@@ -807,7 +833,7 @@ function recordRateLimit(res) {
   }
 }
 
-function httpsGetJson(url, headers = {}, { allowCache = true } = {}) {
+function httpsGetJson(url, headers = {}, { allowCache = true, noAuth = false } = {}) {
   if (allowCache) {
     const cached = cacheGet(url);
     if (cached) return Promise.resolve(cached);
@@ -818,12 +844,19 @@ function httpsGetJson(url, headers = {}, { allowCache = true } = {}) {
   return new Promise((resolve, reject) => {
     const req = https.request(url, {
       method: 'GET',
-      headers: { ...ghHeaders(), ...headers },
+      headers: { ...ghHeaders(noAuth), ...headers },
       timeout: 10000,
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
-        return httpsGetJson(res.headers.location, headers, { allowCache: false }).then(resolve, reject);
+        // Resolve the (possibly relative) Location against the current URL so
+        // a relative redirect can't throw ERR_INVALID_URL and crash the main
+        // process. Drop the auth token on any cross-origin hop.
+        let next;
+        try { next = new URL(res.headers.location, url); }
+        catch { return reject(new Error(`bad redirect location: ${res.headers.location}`)); }
+        const crossOrigin = next.host !== new URL(url).host;
+        return httpsGetJson(next.toString(), headers, { allowCache: false, noAuth: noAuth || crossOrigin }).then(resolve, reject);
       }
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
@@ -883,7 +916,12 @@ function downloadToFile(url, dest, onProgress, { maxBytes = 0 } = {}) {
       }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
-          return follow(res.headers.location, redirects + 1);
+          // Resolve relative redirects; an invalid Location must fail the
+          // download, not throw uncaught out of this callback.
+          let next;
+          try { next = new URL(res.headers.location, u).toString(); }
+          catch { return fail(new Error(`bad redirect location: ${res.headers.location}`)); }
+          return follow(next, redirects + 1);
         }
         if (res.statusCode !== 200) {
           res.resume();
@@ -951,7 +989,24 @@ function sendProgress(slug, payload) {
   try { mainWindow?.webContents.send('cove:install:progress', { slug, ...payload }); } catch {}
 }
 
-async function installOrUpdate(slug, { force = false, tag: explicitTag } = {}) {
+// Guards against a second install/update of the same slug running concurrently:
+// both would fight over the shared `.part` temp path and the read/modify/write
+// of the registry, corrupting state.
+const installsInFlight = new Set();
+
+async function installOrUpdate(slug, opts = {}) {
+  if (installsInFlight.has(slug)) {
+    throw new Error('An install for this program is already in progress.');
+  }
+  installsInFlight.add(slug);
+  try {
+    return await installOrUpdateInner(slug, opts);
+  } finally {
+    installsInFlight.delete(slug);
+  }
+}
+
+async function installOrUpdateInner(slug, { force = false, tag: explicitTag } = {}) {
   sendProgress(slug, { phase: 'resolving' });
   const release = await resolveRelease(slug, { tag: explicitTag });
   const tag = release?.tag_name || '';
@@ -1020,24 +1075,37 @@ async function installOrUpdate(slug, { force = false, tag: explicitTag } = {}) {
         throw new Error(`checksum mismatch for ${asset.name} (expected ${expected.slice(0, 12)}..., got ${actual.slice(0, 12)}...)`);
       }
     } catch (err) {
-      if (/checksum mismatch/i.test(err.message || '')) throw err;
-      console.warn('[cove-sha256]', err?.message || err);
+      // A checksum source was published for this asset, so we must not fall
+      // back to installing an unverified binary: a failed sidecar download or
+      // hash error aborts the install just like a mismatch does.
+      await fsp.rm(tmp, { force: true }).catch(() => {});
+      sendProgress(slug, { phase: 'error' });
+      if (/checksum mismatch/i.test(err?.message || '')) throw err;
+      throw new Error(`checksum verification failed for ${asset.name}: ${err?.message || err}`);
     }
   }
 
   sendProgress(slug, { phase: 'install' });
-  // Only delete the prior file if we put it there. Adopted files belong
-  // to the user; we leave them alone and just point the registry at the
-  // new download.
+  // Commit the new binary first so a crash never leaves the program with
+  // neither the old file nor the new one.
+  await fsp.rename(tmp, finalPath);
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(finalPath, 0o755); }
+    catch (err) {
+      // A binary we can't mark executable is unlaunchable; fail instead of
+      // registering a broken install and reporting success.
+      sendProgress(slug, { phase: 'error' });
+      throw new Error(`could not make ${asset.name} executable: ${err?.message || err}`);
+    }
+  }
+  unblockExe(finalPath);
+
+  // Now that the replacement is in place, remove the prior file only if we put
+  // it there and it lived under a different name. Adopted files belong to the
+  // user; we leave them alone and just point the registry at the new download.
   if (current?.source === 'managed' && current.path && current.path !== finalPath && exists(current.path)) {
     await fsp.rm(current.path, { force: true }).catch(() => {});
   }
-
-  await fsp.rename(tmp, finalPath);
-  if (process.platform !== 'win32') {
-    try { fs.chmodSync(finalPath, 0o755); } catch {}
-  }
-  unblockExe(finalPath);
 
   // Preserve pinnedTag across updates — the pin is user intent, not a
   // function of the release we just downloaded.
@@ -1730,7 +1798,7 @@ ipcMain.handle('cove:config:setPreferences', (_e, prefs = {}) => {
 ipcMain.handle('cove:config:setGithubToken', (_e, token) => {
   const cfg = readConfig();
   cfg.githubToken = typeof token === 'string' ? token.trim() : '';
-  writeConfig(cfg);
+  writeConfig(cfg, { tokenAuthoritative: true });
   // A new token resets our view of the rate limit (authed and unauthed
   // buckets are separate) and invalidates cache so next call uses the
   // new credentials.
@@ -1826,13 +1894,16 @@ ipcMain.handle('cove:scan', async (_e, opts = {}) => {
 
 ipcMain.handle('cove:install', async (_e, slug) => {
   if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
-  // If a legacy git clone is blocking the slug, clear it — the new binary
-  // will land in the programs root, not in ~/.cove-suite.
+  // A legacy git clone blocking the slug is cleared only AFTER the new binary
+  // successfully lands in the programs root, so a failed download never leaves
+  // the user with neither the clone nor a replacement.
   const legacyDir = path.join(LEGACY_PROGRAMS, slug);
-  if (isLegacyClone(slug)) {
-    await fsp.rm(legacyDir, { recursive: true, force: true }).catch(() => {});
+  const hadLegacy = isLegacyClone(slug);
+  try {
+    const res = await installOrUpdate(slug, { force: false });
+    if (hadLegacy) await fsp.rm(legacyDir, { recursive: true, force: true }).catch(() => {});
+    return res;
   }
-  try { return await installOrUpdate(slug, { force: false }); }
   catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
 
@@ -1841,10 +1912,12 @@ ipcMain.handle('cove:update', async (_e, slug) => {
   const reg = readRegistry();
   const legacyDir = path.join(LEGACY_PROGRAMS, slug);
   if (!reg[slug] && !exists(legacyDir)) return { ok: false, error: 'not installed' };
-  if (isLegacyClone(slug)) {
-    await fsp.rm(legacyDir, { recursive: true, force: true }).catch(() => {});
+  const hadLegacy = isLegacyClone(slug);
+  try {
+    const res = await installOrUpdate(slug, { force: false });
+    if (hadLegacy) await fsp.rm(legacyDir, { recursive: true, force: true }).catch(() => {});
+    return res;
   }
-  try { return await installOrUpdate(slug, { force: false }); }
   catch (err) { return { ok: false, error: String(err?.message || err) }; }
 });
 
@@ -2040,7 +2113,8 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
     // Does not overwrite 'failed' status set by the error handler.
     child.once('exit', (code, signal) => {
       const prev = processRegistry.get(slug);
-      if (!prev || prev.status === 'failed') return;
+      // Ignore callbacks from a superseded launch: a newer run owns the slug.
+      if (!prev || prev.runId !== runId || prev.status === 'failed') return;
       const prevStatus = prev.status;
       const errSnippet = stderrBuf.trim().split('\n').slice(0, 3).join(' | ');
       processRegistry.set(slug, {
@@ -2085,6 +2159,12 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
         if (settled) return;
         settled = true;
         const prev = processRegistry.get(slug);
+        // A newer launch already replaced this run: settle our own promise
+        // but do not clobber the newer run's registry state.
+        if (prev && prev.runId !== runId) {
+          resolve({ ok: false, error: String(err?.message || err) });
+          return;
+        }
         const prevStatus = prev?.status ?? null;
         processRegistry.set(slug, {
           ...(prev ?? { slug }),
@@ -2105,6 +2185,11 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
         if (settled) return;
         settled = true;
         const prev = processRegistry.get(slug);
+        // A newer launch already owns the slug: settle without clobbering it.
+        if (prev && prev.runId !== runId) {
+          resolve({ ok: true, alreadyRunning: false, kind: 'app' });
+          return;
+        }
         const prevStatus = prev?.status ?? null;
 
         // Process died before the settle window - report as a failed launch
@@ -2449,13 +2534,27 @@ ipcMain.handle('cove:uninstall', async (_e, slug) => {
   });
   if (response !== 1) return { ok: false, cancelled: true };
 
+  // Managed binary first. If it can't be removed (e.g. locked because the
+  // program is running), keep the registry entry so the UI doesn't falsely
+  // report "not installed", and stop here.
   if (!adopted && info?.path && exists(info.path)) {
-    await fsp.rm(info.path, { force: true }).catch(() => {});
+    try { await fsp.rm(info.path, { force: true }); }
+    catch (e) {
+      return { ok: false, error: `Could not remove ${info.path}: ${e.message}. It may still be running.` };
+    }
   }
+  // The managed binary is gone (or this is an adopted forget / had no file), so
+  // the registry must no longer claim it is installed. Legacy-clone cleanup is
+  // best-effort and must not resurrect the entry if it fails.
+  let legacyErr = null;
   if (exists(legacyDir)) {
-    await fsp.rm(legacyDir, { recursive: true, force: true }).catch(() => {});
+    try { await fsp.rm(legacyDir, { recursive: true, force: true }); }
+    catch (e) { legacyErr = e; }
   }
   forgetInstall(slug);
+  if (legacyErr) {
+    return { ok: false, error: `Removed ${slug}, but could not clean up ${legacyDir}: ${legacyErr.message}` };
+  }
   return { ok: true };
 });
 

@@ -19,6 +19,9 @@
   "dependencies": {
     "electron-updater": "^6.3.9"
   },
+  "overrides": {
+    "js-yaml": "^4.3.0"
+  },
   "devDependencies": {
     "electron": "^33.4.11",
     "electron-builder": "^26.9.0",

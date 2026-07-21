@@ -7,7 +7,12 @@ function setupPortableMode() {
     const portableDataDir = path.join(exeDir, 'cove-app-data');
     const markerFile = path.join(exeDir, 'portable.marker');
 
-    if (!fs.existsSync(portableDataDir) && !fs.existsSync(markerFile)) {
+    // A build produced by electron-builder's portable target always sets
+    // PORTABLE_EXECUTABLE_DIR, so treat that as portable even on first run
+    // before any data dir or marker exists — otherwise a pristine portable
+    // exe would silently write into the host user profile.
+    const isPortableBuild = !!process.env.PORTABLE_EXECUTABLE_DIR;
+    if (!isPortableBuild && !fs.existsSync(portableDataDir) && !fs.existsSync(markerFile)) {
         return false;
     }
 
