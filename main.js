@@ -4,15 +4,16 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const { spawn, execFileSync } = require('node:child_process');
 const os = require('node:os');
-const https = require('node:https');
 const net = require('node:net');
 const crypto = require('node:crypto');
 const { setupPortableMode } = require('./portable');
 const {
-  matchAsset, detectSlugFromFilename, isNewerSemver,
+  matchAsset, isNewerSemver,
   listArtifactsFromNames, planReconcile,
 } = require('./lib/reconcile');
 const { uniqueDownloadPath } = require('./lib/downloads');
+const { createJsonClient, createDownloader } = require('./lib/network');
+const { withInstallWorkspace, checksumForAsset, installAssetPath } = require('./lib/install-workspace');
 const { tabReadyDecision, canResumeHostedView } = require('./lib/tabweb');
 
 const APP_ID = 'cove-nexus';
@@ -279,7 +280,6 @@ app.whenReady().then(() => {
   migrateRenamedSlugs();
   ensureProgramsRoot();
   reconcilePrograms();
-  cleanupStalePrograms();
   const cfg = readConfig();
   applyLoginItem(cfg);
   setupTray();
@@ -448,6 +448,17 @@ function exists(p) {
   try { fs.accessSync(p); return true; } catch { return false; }
 }
 
+// Canonical form for comparing two programsRoot strings as "the same
+// directory": resolves symlinks via realpath when the directory exists
+// (falling back to plain path.resolve() when it doesn't, e.g. a not-yet-
+// created custom root), and compares case-insensitively on Windows, where
+// realpath does not normalize drive-letter casing.
+function canonicalRoot(root) {
+  let resolved;
+  try { resolved = fs.realpathSync(root); } catch { resolved = path.resolve(root); }
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
 // ---------- config (~/.config/cove-nexus/config.json) ----------
 
 // Token storage: prefer Electron's safeStorage (DPAPI on Windows, Keychain on
@@ -517,6 +528,9 @@ function readConfig() {
     ? raw.bookmarks.filter(s => typeof s === 'string' && isValidSlug(s) && !seenBm.has(s) && seenBm.add(s)).sort()
     : [];
   const theme = raw?.theme === 'light' ? 'light' : 'dark';
+  const ignoredAdoptions = Array.isArray(raw?.ignoredAdoptions)
+    ? raw.ignoredAdoptions.filter(item => item && isValidSlug(item.slug) && typeof item.root === 'string')
+    : [];
   return {
     programsRoot: typeof raw?.programsRoot === 'string' && raw.programsRoot
       ? raw.programsRoot
@@ -530,6 +544,7 @@ function readConfig() {
     toolOrder,
     bookmarks,
     theme,
+    ignoredAdoptions,
   };
 }
 
@@ -600,44 +615,27 @@ function registerInstall(slug, info) {
   const reg = readRegistry();
   reg[slug] = { ...(reg[slug] || {}), ...info };
   writeRegistry(reg);
+  const cfg = readConfig();
+  const root = canonicalRoot(cfg.programsRoot);
+  const ignored = cfg.ignoredAdoptions || [];
+  const remaining = ignored.filter(item => item.slug !== slug || canonicalRoot(item.root) !== root);
+  if (remaining.length !== ignored.length) writeConfig({ ...cfg, ignoredAdoptions: remaining });
 }
 
 function forgetInstall(slug) {
+  // A scan must not immediately re-adopt the files the user just forgot (or
+  // an older copy kept after removal). A deliberate install/path selection
+  // clears this exclusion; choosing a different programs folder is independent.
+  // Root identity is compared via canonicalRoot() so equivalent spellings of
+  // the same directory (trailing slash, ./ segments, symlink alias, Windows
+  // case) share one exclusion.
+  const cfg = readConfig();
+  const root = canonicalRoot(cfg.programsRoot);
+  const ignored = (cfg.ignoredAdoptions || []).filter(item => item.slug !== slug || canonicalRoot(item.root) !== root);
+  writeConfig({ ...cfg, ignoredAdoptions: [...ignored, { slug, root }] });
   const reg = readRegistry();
   delete reg[slug];
   writeRegistry(reg);
-}
-
-// ---------- stale file cleanup ----------
-
-// After an update, the old versioned exe/AppImage may still exist if the
-// program was running at update time (Windows locks running exes). Sweep
-// the programs root on boot and delete leftovers - but only for managed
-// installs, and never a file whose parsed version is NEWER than the
-// registered one: that is a self-updated binary reconcilePrograms()
-// should repoint to, and deleting it is never safe.
-function cleanupStalePrograms() {
-  const reg = readRegistry();
-  const root = readConfig().programsRoot;
-  let entries = [];
-  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    if (entry.name.startsWith('.')) continue;
-    const slug = detectSlugFromFilename(entry.name);
-    if (!slug) continue;
-    const fullPath = path.resolve(path.join(root, entry.name));
-    const registered = reg[slug];
-    if (!registered || !registered.path) continue;
-    if (registered.source !== 'managed') continue;
-    if (path.resolve(registered.path) === fullPath) continue;
-    if (!exists(registered.path)) continue;
-    const match = matchAsset(slug, entry.name);
-    if (!match) continue;
-    const regVer = String(registered.tag || '').replace(/^v/, '');
-    if (isNewerSemver(match.version, regVer)) continue;
-    try { fs.unlinkSync(fullPath); } catch {}
-  }
 }
 
 // ---------- asset naming ----------
@@ -676,11 +674,14 @@ function pickAsset(assets) {
 // writes a new versioned filename (registered path goes dead), and the
 // Python fleet installs updates under the new versioned filename next to
 // the old one. Repointing preserves source/pinnedTag/lastKnownLatestTag;
-// older duplicates are deleted only for managed installs.
+// Scanning never deletes files: names alone cannot prove ownership or validity.
 // Runs on boot, on every scan, and before installs.
 // Returns the Map<slug, artifacts> so callers can make pruning decisions.
 function reconcilePrograms() {
-  const root = readConfig().programsRoot;
+  const cfg = readConfig();
+  const root = cfg.programsRoot;
+  const resolvedRoot = canonicalRoot(root);
+  const ignored = new Set((cfg.ignoredAdoptions || []).filter(item => canonicalRoot(item.root) === resolvedRoot).map(item => item.slug));
   let entries = [];
   try { entries = fs.readdirSync(root, { withFileTypes: true }); }
   catch { return new Map(); }
@@ -690,6 +691,7 @@ function reconcilePrograms() {
   const reg = readRegistry();
   let changed = false;
   for (const [slug, artifacts] of bySlug) {
+    if (!reg[slug] && ignored.has(slug)) continue;
     const plan = planReconcile(slug, artifacts, reg[slug], exists);
     if (plan.changed || !reg[slug]) {
       unblockExe(plan.entry.path);
@@ -698,9 +700,6 @@ function reconcilePrograms() {
       }
       reg[slug] = plan.entry;
       changed = true;
-    }
-    for (const p of plan.deletions) {
-      try { fs.unlinkSync(p); } catch {}
     }
   }
   if (changed) writeRegistry(reg);
@@ -805,159 +804,29 @@ function ghHeaders(noAuth = false) {
   return h;
 }
 
-// In-memory cache, keyed by URL. Aggressive caching is the main defense
-// against hitting the 60/hr unauthenticated rate limit while the user
-// pokes at the UI.
-const API_TTL_MS = 5 * 60 * 1000;
-const apiCache = new Map();  // url -> { at, data }
-// When we observe rate-limit headers, block outbound calls until this ms.
-// Callers fall back to cached data if they have any.
+// The client bounds requests, coalesces duplicate lookups, and keeps a small
+// public-only disk cache so an offline launch can reuse recent metadata.
+const apiCache = new Map();
 let rateLimitUntil = 0;
-let rateLimitAuthed = false;  // whether the limit we hit was on an authed request
+let rateLimitAuthed = false;
+const githubClient = createJsonClient({
+  cache: apiCache,
+  cacheFile: path.join(USER_DATA, 'github-cache.json'),
+  getRateLimit: () => ({ until: rateLimitUntil, authed: rateLimitAuthed }),
+  onRateLimit: ({ until, authed }) => { rateLimitUntil = until; rateLimitAuthed = authed; },
+});
 
-function cacheGet(url) {
-  const ent = apiCache.get(url);
-  if (!ent) return null;
-  if (Date.now() - ent.at > API_TTL_MS) { apiCache.delete(url); return null; }
-  return ent.data;
+function clearApiCache() {
+  githubClient.clear();
+  rateLimitUntil = 0;
+  rateLimitAuthed = false;
 }
 
-function cacheSet(url, data) { apiCache.set(url, { at: Date.now(), data }); }
-
-function clearApiCache() { apiCache.clear(); rateLimitUntil = 0; }
-
-function recordRateLimit(res) {
-  const remaining = parseInt(res.headers['x-ratelimit-remaining'] || '-1', 10);
-  const resetSec = parseInt(res.headers['x-ratelimit-reset'] || '0', 10);
-  if (remaining === 0 && resetSec > 0) {
-    rateLimitUntil = resetSec * 1000;
-    rateLimitAuthed = !!readConfig().githubToken;
-  }
+function httpsGetJson(url, headers = {}, { allowCache = true, noAuth = false, allowStale = true } = {}) {
+  return githubClient.getJson(url, { ...ghHeaders(noAuth), ...headers }, { allowCache, allowStale });
 }
 
-function httpsGetJson(url, headers = {}, { allowCache = true, noAuth = false } = {}) {
-  if (allowCache) {
-    const cached = cacheGet(url);
-    if (cached) return Promise.resolve(cached);
-  }
-  if (Date.now() < rateLimitUntil) {
-    return Promise.reject(new Error(`github rate-limited until ${new Date(rateLimitUntil).toLocaleTimeString()}`));
-  }
-  return new Promise((resolve, reject) => {
-    const req = https.request(url, {
-      method: 'GET',
-      headers: { ...ghHeaders(noAuth), ...headers },
-      timeout: 10000,
-    }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        res.resume();
-        // Resolve the (possibly relative) Location against the current URL so
-        // a relative redirect can't throw ERR_INVALID_URL and crash the main
-        // process. Drop the auth token on any cross-origin hop.
-        let next;
-        try { next = new URL(res.headers.location, url); }
-        catch { return reject(new Error(`bad redirect location: ${res.headers.location}`)); }
-        const crossOrigin = next.host !== new URL(url).host;
-        return httpsGetJson(next.toString(), headers, { allowCache: false, noAuth: noAuth || crossOrigin }).then(resolve, reject);
-      }
-      const chunks = [];
-      res.on('data', (c) => chunks.push(c));
-      res.on('end', () => {
-        recordRateLimit(res);
-        const body = Buffer.concat(chunks).toString('utf8');
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          try {
-            const parsed = JSON.parse(body);
-            cacheSet(url, parsed);
-            resolve(parsed);
-          } catch (e) { reject(e); }
-          return;
-        }
-        // 403 with rate-limit exhaustion is the common case here; be
-        // explicit so the UI can surface "try again at X:YY" instead of a
-        // generic error.
-        if (res.statusCode === 403 && /rate limit/i.test(body)) {
-          if (!rateLimitUntil) {
-            // Fall back to a 1-hour window if the server didn't send reset.
-            rateLimitUntil = Date.now() + 60 * 60 * 1000;
-            rateLimitAuthed = !!readConfig().githubToken;
-          }
-          const cached = cacheGet(url);
-          if (cached) return resolve(cached);
-          return reject(new Error(`github rate-limited until ${new Date(rateLimitUntil).toLocaleTimeString()}`));
-        }
-        reject(new Error(`github ${res.statusCode}: ${body.slice(0, 200)}`));
-      });
-    });
-    req.on('timeout', () => req.destroy(new Error('timeout')));
-    req.on('error', reject);
-    req.end();
-  });
-}
-
-// maxBytes (optional) caps how much we'll write to disk. Caller passes the
-// expected GitHub asset size plus a small tolerance; if the server hands us
-// more than that we abort. Without this an attacker who could swap a redirect
-// target for a bottomless stream would just fill the user's disk.
-function downloadToFile(url, dest, onProgress, { maxBytes = 0 } = {}) {
-  return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(dest);
-    let finished = false;
-    let received = 0;
-    let total = 0;
-    const fail = (err) => {
-      if (finished) return;
-      finished = true;
-      file.close(() => fs.unlink(dest, () => reject(err)));
-    };
-    const follow = (u, redirects) => {
-      if (redirects > 5) return fail(new Error('too many redirects'));
-      const req = https.get(u, {
-        headers: { 'User-Agent': UA, 'Accept': 'application/octet-stream' },
-        timeout: 60000,
-      }, (res) => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          res.resume();
-          // Resolve relative redirects; an invalid Location must fail the
-          // download, not throw uncaught out of this callback.
-          let next;
-          try { next = new URL(res.headers.location, u).toString(); }
-          catch { return fail(new Error(`bad redirect location: ${res.headers.location}`)); }
-          return follow(next, redirects + 1);
-        }
-        if (res.statusCode !== 200) {
-          res.resume();
-          return fail(new Error(`download ${res.statusCode} for ${u}`));
-        }
-        total = parseInt(res.headers['content-length'] || '0', 10);
-        if (maxBytes && total && total > maxBytes) {
-          res.resume();
-          return fail(new Error(`download too large: ${total} > ${maxBytes}`));
-        }
-        if (onProgress) onProgress({ received: 0, total });
-        res.on('data', (chunk) => {
-          received += chunk.length;
-          if (maxBytes && received > maxBytes) {
-            req.destroy();
-            return fail(new Error(`download exceeded ${maxBytes} bytes`));
-          }
-          if (onProgress) onProgress({ received, total });
-        });
-        res.pipe(file);
-        file.on('finish', () => {
-          if (finished) return;
-          finished = true;
-          file.close((err) => err ? reject(err) : resolve());
-        });
-        res.on('error', fail);
-      });
-      req.on('timeout', () => req.destroy(new Error('timeout')));
-      req.on('error', fail);
-    };
-    file.on('error', fail);
-    follow(url, 0);
-  });
-}
+const downloadToFile = createDownloader();
 
 async function fetchLatestRelease(slug) {
   return httpsGetJson(`https://api.github.com/repos/${GITHUB_OWNER}/${slug}/releases/latest`);
@@ -1018,6 +887,15 @@ async function installOrUpdateInner(slug, { force = false, tag: explicitTag } = 
     const plat = process.platform === 'darwin' ? 'macOS' : process.platform;
     throw new Error(`No ${plat} build available in release ${tag || '(unknown)'}.`);
   }
+  // The release asset's filename becomes the on-disk destination below, so it
+  // must structurally belong to the requested slug before anything touches
+  // disk. A mismatch (wrong cached release, mis-published asset) would
+  // otherwise let this install silently land on - or later cause cleanup of -
+  // a completely different program's file.
+  if (!matchAsset(slug, asset.name)) {
+    sendProgress(slug, { phase: 'error' });
+    throw new Error(`Release asset "${asset.name}" does not match ${slug}'s identity; refusing to install.`);
+  }
 
   // Reconcile first so the already-installed short-circuit and the
   // managed old-file deletion below operate on the real on-disk state,
@@ -1026,99 +904,115 @@ async function installOrUpdateInner(slug, { force = false, tag: explicitTag } = 
   const reg = readRegistry();
   const current = reg[slug];
   const root = ensureProgramsRoot();
-  const finalPath = path.join(root, asset.name);
+  const finalPath = installAssetPath(root, asset.name);
 
   if (!force && current?.tag === tag && current.path && exists(current.path)) {
     sendProgress(slug, { phase: 'done' });
     return { ok: true, already: true, tag };
   }
 
-  const tmp = path.join(root, `.${asset.name}.part`);
-  sendProgress(slug, { phase: 'download', received: 0, total: asset.size || 0 });
-  // Hard cap: the GitHub-reported asset size plus 1 MiB of slack, falling back
-  // to a 1 GiB ceiling if the API didn't give us a size. Releases beyond that
-  // either aren't real or aren't ours.
-  const maxBytes = asset.size ? asset.size + 1024 * 1024 : 1024 * 1024 * 1024;
-  try {
-    await downloadToFile(asset.browser_download_url, tmp, (p) => {
-      sendProgress(slug, { phase: 'download', received: p.received, total: p.total || asset.size || 0 });
-    }, { maxBytes });
-  } catch (err) {
-    sendProgress(slug, { phase: 'error' });
-    throw err;
-  }
-
-  // Optional checksum verification - looks for a per-asset <name>.sha256
-  // sidecar on the release (fleet policy: one sidecar per artifact). Falls
-  // back to a bundled checksums-sha256.txt on older releases, finding the
-  // line matching this asset. Absent - skip silently; mismatch - abort.
-  const sidecarAsset = (release.assets || []).find(a => a?.name === `${asset.name}.sha256`);
-  const bundleAsset = !sidecarAsset && (release.assets || []).find(a => a?.name === 'checksums-sha256.txt');
-  const shaSource = sidecarAsset || bundleAsset;
-  if (shaSource) {
-    sendProgress(slug, { phase: 'verify' });
+  return withInstallWorkspace(root, async (workspace) => {
+    const tmp = path.join(workspace, 'asset.part');
+    sendProgress(slug, { phase: 'download', received: 0, total: asset.size || 0 });
+    // Hard cap: the GitHub-reported asset size plus 1 MiB of slack, falling back
+    // to a 1 GiB ceiling if the API didn't give us a size. Releases beyond that
+    // either aren't real or aren't ours.
+    const maxBytes = asset.size ? asset.size + 1024 * 1024 : 1024 * 1024 * 1024;
     try {
-      const shaTmp = path.join(root, `.${shaSource.name}.part`);
-      // checksums-sha256.txt is small; 8 KiB is generous. Sidecars even smaller.
-      await downloadToFile(shaSource.browser_download_url, shaTmp, null, { maxBytes: 8192 });
-      const shaText = fs.readFileSync(shaTmp, 'utf8').trim();
-      fs.unlinkSync(shaTmp);
-      let expected = '';
-      if (bundleAsset) {
-        const line = shaText.split('\n').find(l => l.trim().endsWith(asset.name));
-        expected = (line ? line.split(/\s+/)[0] : '').toLowerCase();
-      } else {
-        expected = (shaText.split(/\s+/)[0] || '').toLowerCase();
-      }
-      const actual = await sha256File(tmp);
-      if (!/^[a-f0-9]{64}$/.test(expected) || expected !== actual) {
+      await downloadToFile(asset.browser_download_url, tmp, (p) => {
+        sendProgress(slug, { phase: 'download', received: p.received, total: p.total || asset.size || 0 });
+      }, { maxBytes });
+    } catch (err) {
+      sendProgress(slug, { phase: 'error' });
+      throw err;
+    }
+
+    // Optional checksum verification - looks for a per-asset <name>.sha256
+    // sidecar on the release (fleet policy: one sidecar per artifact). Falls
+    // back to a bundled checksums-sha256.txt on older releases, finding the
+    // line matching this asset. Absent - skip silently; mismatch - abort.
+    const sidecarAsset = (release.assets || []).find(a => a?.name === `${asset.name}.sha256`);
+    const bundleAsset = !sidecarAsset && (release.assets || []).find(a => a?.name === 'checksums-sha256.txt');
+    const shaSource = sidecarAsset || bundleAsset;
+    if (shaSource) {
+      sendProgress(slug, { phase: 'verify' });
+      try {
+        const shaTmp = path.join(workspace, 'checksum.part');
+        // checksums-sha256.txt is small; 8 KiB is generous. Sidecars even smaller.
+        await downloadToFile(shaSource.browser_download_url, shaTmp, null, { maxBytes: 8192 });
+        const shaText = fs.readFileSync(shaTmp, 'utf8').trim();
+        fs.unlinkSync(shaTmp);
+        const expected = checksumForAsset(shaText, asset.name, !!bundleAsset);
+        const actual = await sha256File(tmp);
+        if (!/^[a-f0-9]{64}$/.test(expected) || expected !== actual) {
+          await fsp.rm(tmp, { force: true }).catch(() => {});
+          sendProgress(slug, { phase: 'error' });
+          throw new Error(`checksum mismatch for ${asset.name} (expected ${expected.slice(0, 12)}..., got ${actual.slice(0, 12)}...)`);
+        }
+      } catch (err) {
+        // A checksum source was published for this asset, so we must not fall
+        // back to installing an unverified binary: a failed sidecar download or
+        // hash error aborts the install just like a mismatch does.
         await fsp.rm(tmp, { force: true }).catch(() => {});
         sendProgress(slug, { phase: 'error' });
-        throw new Error(`checksum mismatch for ${asset.name} (expected ${expected.slice(0, 12)}..., got ${actual.slice(0, 12)}...)`);
+        if (/checksum mismatch/i.test(err?.message || '')) throw err;
+        throw new Error(`checksum verification failed for ${asset.name}: ${err?.message || err}`);
       }
-    } catch (err) {
-      // A checksum source was published for this asset, so we must not fall
-      // back to installing an unverified binary: a failed sidecar download or
-      // hash error aborts the install just like a mismatch does.
-      await fsp.rm(tmp, { force: true }).catch(() => {});
-      sendProgress(slug, { phase: 'error' });
-      if (/checksum mismatch/i.test(err?.message || '')) throw err;
-      throw new Error(`checksum verification failed for ${asset.name}: ${err?.message || err}`);
     }
-  }
 
-  sendProgress(slug, { phase: 'install' });
-  // Commit the new binary first so a crash never leaves the program with
-  // neither the old file nor the new one.
-  await fsp.rename(tmp, finalPath);
-  if (process.platform !== 'win32') {
-    try { fs.chmodSync(finalPath, 0o755); }
-    catch (err) {
-      // A binary we can't mark executable is unlaunchable; fail instead of
-      // registering a broken install and reporting success.
-      sendProgress(slug, { phase: 'error' });
-      throw new Error(`could not make ${asset.name} executable: ${err?.message || err}`);
+    sendProgress(slug, { phase: 'install' });
+    if (process.platform !== 'win32') {
+      try { fs.chmodSync(tmp, 0o755); }
+      catch (err) {
+        // A binary we can't mark executable is unlaunchable; fail instead of
+        // registering a broken install and reporting success.
+        sendProgress(slug, { phase: 'error' });
+        throw new Error(`could not make ${asset.name} executable: ${err?.message || err}`);
+      }
     }
-  }
-  unblockExe(finalPath);
+    // Validate permissions before replacing a working binary, then commit on
+    // the same filesystem so readers never observe a partial download.
+    await fsp.rename(tmp, finalPath);
+    unblockExe(finalPath);
 
-  // Now that the replacement is in place, remove the prior file only if we put
-  // it there and it lived under a different name. Adopted files belong to the
-  // user; we leave them alone and just point the registry at the new download.
-  if (current?.source === 'managed' && current.path && current.path !== finalPath && exists(current.path)) {
-    await fsp.rm(current.path, { force: true }).catch(() => {});
-  }
+    // Now that the replacement is in place, remove the prior file only if we put
+    // it there, it lived under a different name, and it still structurally
+    // belongs to this slug. That last check is load-bearing: a stale or
+    // corrupted registry entry for this slug must never make Nexus delete a
+    // file belonging to a different program. Identity is checked via the
+    // real (symlink-resolved) filesystem path on both sides, compared
+    // case-insensitively on Windows (realpathSync does not normalize drive-
+    // letter casing there, only path segments), and BOTH lookups must
+    // succeed before any delete decision is made: if either can't be
+    // resolved, we cannot prove the files differ, so we fail closed and skip
+    // the delete rather than risk deleting the file we just installed.
+    let currentRealPath = null;
+    if (current?.path && exists(current.path)) {
+      try { currentRealPath = fs.realpathSync(current.path); } catch { currentRealPath = null; }
+    }
+    let finalRealPath = null;
+    try { finalRealPath = fs.realpathSync(finalPath); } catch { finalRealPath = null; }
+    const sameFile = currentRealPath !== null && finalRealPath !== null && (
+      process.platform === 'win32'
+        ? currentRealPath.toLowerCase() === finalRealPath.toLowerCase()
+        : currentRealPath === finalRealPath
+    );
+    if (current?.source === 'managed' && currentRealPath !== null && finalRealPath !== null && !sameFile
+        && matchAsset(slug, path.basename(current.path))) {
+      await fsp.rm(current.path, { force: true }).catch(() => {});
+    }
 
-  // Preserve pinnedTag across updates — the pin is user intent, not a
-  // function of the release we just downloaded.
-  registerInstall(slug, {
-    tag,
-    path: finalPath,
-    source: 'managed',
-    ...(current?.pinnedTag ? { pinnedTag: current.pinnedTag } : {}),
+    // Preserve pinnedTag across updates — the pin is user intent, not a
+    // function of the release we just downloaded.
+    registerInstall(slug, {
+      tag,
+      path: finalPath,
+      source: 'managed',
+      ...(current?.pinnedTag ? { pinnedTag: current.pinnedTag } : {}),
+    });
+    sendProgress(slug, { phase: 'done' });
+    return { ok: true, tag };
   });
-  sendProgress(slug, { phase: 'done' });
-  return { ok: true, tag };
 }
 
 function sha256File(filePath) {
@@ -2656,9 +2550,8 @@ ipcMain.handle('cove:window:isMaximized', () => BrowserWindow.getFocusedWindow()
 
 ipcMain.handle('cove:discover', async (_e, opts = {}) => {
   const url = `https://api.github.com/users/${GITHUB_OWNER}/repos?per_page=100&sort=updated`;
-  if (opts.force) apiCache.delete(url);
   try {
-    const repos = await httpsGetJson(url);
+    const repos = await httpsGetJson(url, {}, { allowCache: !opts.force });
     // Bot repos (e.g. cove-*-bot) aren't user-installable tools, so we hide
     // them from discovery. Anything with "bot" in the name is excluded.
     // Repos with no published GitHub release or no asset compatible with the

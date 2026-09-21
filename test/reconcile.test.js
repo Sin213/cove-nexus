@@ -4,9 +4,12 @@ const {
   matchAsset,
   detectSlugFromFilename,
   isNewerSemver,
-  listArtifactsFromNames,
-  planReconcile,
+  listArtifactsFromNames: listArtifacts,
+  planReconcile: reconcile,
 } = require('../lib/reconcile');
+
+const listArtifactsFromNames = (names, join) => listArtifacts(names, join, 'linux');
+const planReconcile = (...args) => reconcile(...args, 'linux');
 
 const SLUG = 'cove-pdf-editor';
 const art = (version, name) => ({
@@ -28,8 +31,8 @@ test('listArtifactsFromNames groups by slug and skips unparseable names', () => 
   ];
   const map = listArtifactsFromNames(names, (n) => `/programs/${n}`);
   assert.equal(map.get('cove-pdf-editor').length, 2);
-  assert.equal(map.get('cove-image-upscaler').length, 1);
-  assert.equal(map.size, 2);
+  assert.equal(map.has('cove-image-upscaler'), false);
+  assert.equal(map.size, 1);
 });
 
 test('no registry entry: adopts best version, deletes nothing', () => {
@@ -55,33 +58,33 @@ test('registered path gone, newer file exists: repoints, preserves source and pi
   assert.equal(plan.changed, true);
 });
 
-test('registered path exists + newer file exists: repoints, deletes older when managed', () => {
+test('registered path exists + newer file exists: repoints without deleting the previous binary', () => {
   const oldArt = appimage('1.2.0');
   const newArt = appimage('1.3.0');
   const entry = { tag: 'v1.2.0', path: oldArt.path, source: 'managed' };
   const plan = planReconcile(SLUG, [oldArt, newArt], entry, existsIn(oldArt.path, newArt.path));
   assert.equal(plan.entry.tag, 'v1.3.0');
   assert.equal(plan.entry.path, newArt.path);
-  assert.deepEqual(plan.deletions, [oldArt.path]);
+  assert.deepEqual(plan.deletions, []);
 });
 
-test('two files newer than registry: picks max version, deletes loser when managed', () => {
+test('two files newer than registry: picks max version without claiming ownership of neighbors', () => {
   const a = appimage('1.3.0');
   const b = appimage('1.4.0');
   const entry = { tag: 'v1.2.0', path: '/programs/gone.AppImage', source: 'managed' };
   const plan = planReconcile(SLUG, [a, b], entry, existsIn(a.path, b.path));
   assert.equal(plan.entry.tag, 'v1.4.0');
-  assert.deepEqual(plan.deletions, [a.path]);
+  assert.deepEqual(plan.deletions, []);
 });
 
-test('same-version duplicate: keeps registered path, deletes dup when managed', () => {
+test('same-version duplicate: keeps registered path and preserves the duplicate', () => {
   const registered = appimage('1.3.0');
   const dup = art('1.3.0', `${SLUG}-1.3.0-x86_64_ab12cd34.AppImage`);
   const entry = { tag: 'v1.3.0', path: registered.path, source: 'managed' };
   const plan = planReconcile(SLUG, [dup, registered], entry, existsIn(registered.path, dup.path));
   assert.equal(plan.entry.path, registered.path);
   assert.equal(plan.changed, false);
-  assert.deepEqual(plan.deletions, [dup.path]);
+  assert.deepEqual(plan.deletions, []);
 });
 
 test('self-update past a pin: pin untouched, tag follows disk', () => {
@@ -111,13 +114,13 @@ test('up-to-date managed entry: no change, no deletions', () => {
   assert.deepEqual(plan.deletions, []);
 });
 
-test('disk older than registry, registered path alive: keeps entry, sweeps older managed copy', () => {
+test('disk older than registry, registered path alive: preserves untracked older copy', () => {
   const older = appimage('1.1.0');
   const cur = appimage('1.3.0');
   const entry = { tag: 'v1.3.0', path: cur.path, source: 'managed' };
   const plan = planReconcile(SLUG, [older, cur], entry, existsIn(older.path, cur.path));
   assert.equal(plan.changed, false);
-  assert.deepEqual(plan.deletions, [older.path]);
+  assert.deepEqual(plan.deletions, []);
 });
 
 test('matchAsset accepts fleet artifact shapes, rejects sidecars', () => {
@@ -139,4 +142,31 @@ test('isNewerSemver basic ordering', () => {
   assert.equal(isNewerSemver('1.2.0', '1.2.0'), false);
   assert.equal(isNewerSemver('1.2', '1.2.1'), false);
   assert.equal(isNewerSemver('2.0.0', '1.9.9'), true);
+});
+
+test('Linux reconciliation ignores newer Windows installers and deb packages', () => {
+  const current = appimage('1.0.0');
+  const entry = { tag: 'v1.0.0', path: current.path, source: 'managed' };
+  for (const name of [`${SLUG}-9.0.0-Portable.exe`, `${SLUG}-9.0.0-Setup.exe`, `${SLUG}_9.0.0_amd64.deb`]) {
+    const incompatible = art('9.0.0', name);
+    const plan = planReconcile(SLUG, [current, incompatible], entry, existsIn(current.path, incompatible.path));
+    assert.equal(plan.entry, entry);
+    assert.deepEqual(plan.deletions, []);
+    assert.equal(planReconcile(SLUG, [incompatible], undefined, existsIn()).entry, undefined);
+  }
+});
+
+test('Windows adoption includes portable executables only', () => {
+  const names = [`${SLUG}-1.0.0-Portable.exe`, `${SLUG}-9.0.0-Setup.exe`, `${SLUG}-9.0.0-x86_64.AppImage`];
+  const found = listArtifacts(names, n => `/programs/${n}`, 'win32');
+  assert.deepEqual(found.get(SLUG).map(a => a.name), [names[0]]);
+});
+
+test('a live pinned installation is not replaced by a neighboring newer file', () => {
+  const current = appimage('1.0.0');
+  const newer = appimage('2.0.0');
+  const entry = { tag: 'v1.0.0', path: current.path, source: 'managed', pinnedTag: 'v1.0.0' };
+  const plan = planReconcile(SLUG, [current, newer], entry, existsIn(current.path, newer.path));
+  assert.equal(plan.entry, entry);
+  assert.deepEqual(plan.deletions, []);
 });
