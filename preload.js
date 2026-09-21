@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('coveAPI', {
   update:         (slug) => ipcRenderer.invoke('cove:update', slug),
   launch:         (slug, openMode) => ipcRenderer.invoke('cove:launch', slug, openMode),
   closeTabWeb:    (slug) => ipcRenderer.invoke('cove:tab-web:close', slug),
+  recoverTabWeb:  (slug) => ipcRenderer.invoke('cove:tab-web:recover', slug),
   showTabWebView: (slug, bounds) => ipcRenderer.invoke('cove:tab-web:show', slug, bounds),
   hideTabWebView: (slug)         => ipcRenderer.invoke('cove:tab-web:hide', slug),
   setSidebarState: (s)           => ipcRenderer.invoke('cove:tab-web:sidebarState', s),

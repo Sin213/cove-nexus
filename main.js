@@ -14,7 +14,9 @@ const {
 const { uniqueDownloadPath } = require('./lib/downloads');
 const { createJsonClient, createDownloader } = require('./lib/network');
 const { withInstallWorkspace, checksumForAsset, installAssetPath } = require('./lib/install-workspace');
-const { tabReadyDecision, canResumeHostedView } = require('./lib/tabweb');
+const { tabReadyDecision, canResumeHostedView, isValidTabUrl } = require('./lib/tabweb');
+const { effectiveOpenMode } = require('./lib/open-mode');
+const { buildHostedView } = require('./lib/hosted-view');
 
 const APP_ID = 'cove-nexus';
 const GITHUB_OWNER = 'Sin213';
@@ -1236,6 +1238,7 @@ function handleProtocolMessage(slug, msg) {
   };
 
   proto.connected = true;
+  let tabToAttach = null;
 
   switch (msg.type) {
     case 'app_ready':
@@ -1300,10 +1303,14 @@ function handleProtocolMessage(slug, msg) {
       const decision = tabReadyDecision(entry, proto, msg.url, isValidTabUrl);
       if (decision === 'ignore') return;
       proto.tabUrl = msg.url;
+      proto.tabFallback = false;
+      proto.tabError = null;
+      proto.tabRecoverable = false;
+      proto.tabLoading = decision === 'attach';
       clearTabReadyTimer(slug);
       // 'record': the tab was closed while the app was still starting, so
       // remember the URL for a later reopen but build no view nobody can see.
-      if (decision === 'attach') createHostedView(slug, msg.url);
+      if (decision === 'attach') tabToAttach = msg.url;
       break;
     }
 
@@ -1317,6 +1324,7 @@ function handleProtocolMessage(slug, msg) {
     processUpdatedAt: Date.now(),
   });
   broadcastProcessUpdate(slug, entry.status);
+  if (tabToAttach) createHostedView(slug, tabToAttach);
 }
 
 // ---------- end foxy v4 protocol ----------
@@ -1324,17 +1332,6 @@ function handleProtocolMessage(slug, msg) {
 // ---------- foxy v5 tab-web host ----------
 // Hosted views are created when a tab-web app sends a valid tab_ready message.
 // Renderer sends bounds via cove:tab-web:show; main attaches via addChildView + setBounds.
-
-function isValidTabUrl(url) {
-  let parsed;
-  try { parsed = new URL(url); } catch { return false; }
-  if (parsed.protocol !== 'http:') return false;
-  if (parsed.hostname !== '127.0.0.1') return false;
-  const port = parseInt(parsed.port, 10);
-  if (!port || port < 1024 || port > 65535) return false;
-  if (parsed.username || parsed.password) return false;
-  return true;
-}
 
 const hostedViews = new Map();    // slug → WebContentsView
 const childViews  = new Set();    // slugs whose view is currently addChildView'd
@@ -1415,31 +1412,23 @@ function clearTabReadyTimer(slug) {
 }
 
 function createHostedView(slug, url) {
-  destroyHostedView(slug);
-  const allowedOrigin = new URL(url).origin; // e.g. "http://127.0.0.1:12345"
-
-  function guardNav(details) {
-    if (!details.isMainFrame) return;
-    let sameOrigin = false;
-    try { sameOrigin = new URL(details.url).origin === allowedOrigin; } catch { /* deny */ }
-    if (!sameOrigin) details.preventDefault();
-  }
-
-  const view = new WebContentsView({
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
-      webSecurity: true,
-      allowRunningInsecureContent: false,
-    },
+  destroyHostedView(slug, { keepUrl: true });
+  const runId = processRegistry.get(slug)?.runId;
+  const update = (view, patch) => {
+    const entry = processRegistry.get(slug);
+    if (!entry || entry.runId !== runId || hostedViews.get(slug) !== view) return;
+    if (patch.tabError) destroyHostedView(slug, { keepUrl: true });
+    processRegistry.set(slug, {
+      ...entry, protocol: { ...entry.protocol, ...patch }, processUpdatedAt: Date.now(),
+    });
+    broadcastProcessUpdate(slug, entry.status);
+  };
+  const view = buildHostedView({
+    WebContentsView, slug, url, wireDownloads: wireHostedDownloads,
+    onLoaded: view => update(view, { tabLoading: false, tabError: null, tabRecoverable: false }),
+    onFailure: (view, error) => update(view, { tabLoading: false, tabError: error, tabRecoverable: true }),
   });
-  view.webContents.on('will-navigate', guardNav);
-  view.webContents.on('will-redirect', guardNav);
-  view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  wireHostedDownloads(view.webContents.session);
   hostedViews.set(slug, view);
-  view.webContents.loadURL(url);
 }
 
 // A WebContentsView has no owning BrowserWindow, so Electron's default
@@ -1448,11 +1437,11 @@ function createHostedView(slug, url) {
 // in 'progressing' forever and no file is ever written. Pick the save path
 // ourselves — Downloads, de-duplicated — and tell the renderer so the user
 // learns where the file landed.
-let hostedDownloadsWired = false;
+const hostedDownloadSessions = new WeakSet();
 const pendingDownloadPaths = new Set(); // save paths claimed by in-flight downloads
 function wireHostedDownloads(session) {
-  if (hostedDownloadsWired) return;
-  hostedDownloadsWired = true;
+  if (hostedDownloadSessions.has(session)) return;
+  hostedDownloadSessions.add(session);
 
   session.on('will-download', (_event, item, webContents) => {
     const slug = slugForHostedContents(webContents);
@@ -1496,7 +1485,7 @@ function resumeHostedView(slug) {
   if (!canResumeHostedView(e, isValidTabUrl)) return;
 
   createHostedView(slug, e.protocol.tabUrl);
-  const proto = { ...e.protocol, tabClosed: false };
+  const proto = { ...e.protocol, tabClosed: false, tabLoading: true };
   processRegistry.set(slug, { ...e, protocol: proto, processUpdatedAt: Date.now() });
   broadcastProcessUpdate(slug, e.status);
 }
@@ -1963,7 +1952,7 @@ ipcMain.handle('cove:process:focus', (_e, slug) => {
 
 ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
   if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
-  const openMode = rawOpenMode === 'tab-web' ? 'tab-web' : 'external';
+  let openMode = rawOpenMode === 'tab-web' ? 'tab-web' : 'external';
   if (isLegacyClone(slug)) {
     return { ok: false, error: 'This install is from an older version. Click Update to reinstall as a binary.' };
   }
@@ -2025,6 +2014,17 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
   // rapid double-clicks are resolved by the registry, not by the busy flag alone.
   const existing = processRegistry.get(slug);
   if (existing && (existing.status === 'launching' || existing.status === 'running')) {
+    // A reopened tab must restart its view without waiting for renderer bounds.
+    // While a page is loading the renderer deliberately sends no show request.
+    if (openMode === 'tab-web' && existing.openMode === 'tab-web' && existing.protocol?.tabClosed) {
+      processRegistry.set(slug, {
+        ...existing,
+        protocol: { ...existing.protocol, tabClosed: false },
+        processUpdatedAt: Date.now(),
+      });
+      if (!hostedViews.has(slug)) resumeHostedView(slug);
+      broadcastProcessUpdate(slug, existing.status);
+    }
     return { ok: true, alreadyRunning: true, kind: 'app' };
   }
 
@@ -2047,6 +2047,9 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
   // Create socket server before spawn (Linux only; null on other platforms or failure)
   const appName = slugToDisplayName(slug);
   const sockPath = await createSocketServer(slug, runId);
+  openMode = effectiveOpenMode(openMode, process.platform, sockPath);
+  processRegistry.set(slug, { ...processRegistry.get(slug), openMode });
+  broadcastProcessUpdate(slug, 'launching');
   const nexusEnv = buildNexusEnv(slug, runId, appName, sockPath, openMode);
 
   const plan = planFromPath(info.path);
@@ -2112,6 +2115,9 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
         if (!e || e.runId !== runId || e.protocol?.tabUrl) return;
         const proto = e.protocol ? { ...e.protocol } : {};
         proto.tabFallback = true;
+        proto.tabError = 'The embedded interface has not become ready. Nexus will attach it if the app reports its address later.';
+        proto.tabRecoverable = false;
+        proto.tabLoading = false;
         processRegistry.set(slug, { ...e, protocol: proto, processUpdatedAt: Date.now() });
         broadcastProcessUpdate(slug, e.status);
       }, 10000);
@@ -2208,7 +2214,7 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
         }
         // Guard: do not hide Nexus while Foxy Mode is on.
         if (readConfig().closeAfterLaunch && !readConfig().foxyMode && mainWindow) mainWindow.hide();
-        resolve({ ok: true, kind: plan.kind });
+        resolve({ ok: true, kind: plan.kind, openMode });
       }, 600);
 
       // Secondary liveness recheck. With shell:true on Windows, cmd.exe
@@ -2258,6 +2264,8 @@ ipcMain.handle('cove:tab-web:show', (_e, slug, bounds) => {
   // Reopening a tab that was closed while its app kept running: rebuild the
   // view from the URL the app already reported.
   if (!hostedViews.has(slug)) resumeHostedView(slug);
+  const protocol = processRegistry.get(slug)?.protocol;
+  if (protocol?.tabLoading || protocol?.tabClosed || protocol?.tabError) return;
 
   const view = hostedViews.get(slug);
   if (!view || view.webContents.isDestroyed()) return;
@@ -2310,6 +2318,22 @@ ipcMain.handle('cove:tab-web:show', (_e, slug, bounds) => {
   view.setBounds({ x, y, width, height });
 });
 
+ipcMain.handle('cove:tab-web:recover', (_e, slug) => {
+  if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
+  const entry = processRegistry.get(slug);
+  if (!entry || entry.openMode !== 'tab-web' || !['launching', 'running'].includes(entry.status) ||
+      !isValidTabUrl(entry.protocol?.tabUrl)) {
+    return { ok: false, error: 'The app has not reported an available embedded interface.' };
+  }
+  processRegistry.set(slug, {
+    ...entry, protocol: { ...entry.protocol, tabError: null, tabRecoverable: false, tabLoading: true, tabClosed: false },
+    processUpdatedAt: Date.now(),
+  });
+  createHostedView(slug, entry.protocol.tabUrl);
+  broadcastProcessUpdate(slug, entry.status);
+  return { ok: true };
+});
+
 ipcMain.handle('cove:tab-web:hide', (_e, slug) => {
   if (!isValidSlug(slug)) return;
   const view = hostedViews.get(slug);
@@ -2333,9 +2357,8 @@ ipcMain.handle('cove:tab-web:chromeMode', (_e, m) => {
 
 ipcMain.handle('cove:tab-web:close', (_e, slug) => {
   if (!isValidSlug(slug)) return;
-  clearTabReadyTimer(slug);
-  // Mark the session closed so any late tab_ready (including socket-race before first message)
-  // is rejected. Initialise protocol from existing state or a safe empty base.
+  // Keep the readiness deadline while the child is still starting. A late
+  // tab_ready records its URL without opening a view until the tab reopens.
   const e = processRegistry.get(slug);
   if (e?.openMode === 'tab-web') {
     const base = e.protocol ?? {
@@ -2347,7 +2370,7 @@ ipcMain.handle('cove:tab-web:close', (_e, slug) => {
     // so keep the URL and mark the session paused. Reopening the tab rebuilds
     // the view from this URL; a tab_ready still in flight is recorded but
     // does not create a view.
-    const proto = { ...base, tabClosed: true };
+    const proto = { ...base, tabClosed: true, tabLoading: false };
     processRegistry.set(slug, { ...e, protocol: proto, processUpdatedAt: Date.now() });
     broadcastProcessUpdate(slug, e.status);
   }

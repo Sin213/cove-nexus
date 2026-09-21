@@ -174,11 +174,13 @@
       const isActive = tab.id === state.activeTabId;
       const tabId = escapeAttr(tab.id);
       const tabTitle = escapeAttr(tab.title);
+      const lifecycle = tab.slug ? processStatusFor(tab.slug) : '';
+      const label = tab.slug ? `${tabTitle} — ${displayStatusFor(tab.slug)}` : tabTitle;
       const closeBtn = tab.kind !== 'home'
         ? `<button class="foxy-tab-close" data-close-tab="${tabId}" aria-label="Close ${tabTitle} tab">×</button>`
         : '';
-      return `<span class="foxy-tab${isActive ? ' active' : ''}" data-tab-id="${tabId}">` +
-        `<button class="foxy-tab-activate" data-tab-id="${tabId}" role="tab" aria-selected="${isActive}">${tabTitle}</button>` +
+      return `<span class="foxy-tab${isActive ? ' active' : ''}" data-tab-id="${tabId}" data-process-status="${escapeAttr(lifecycle)}" title="${label}">` +
+        `<button class="foxy-tab-activate" data-tab-id="${tabId}" role="tab" aria-label="${label}" aria-selected="${isActive}">${tabTitle}</button>` +
         closeBtn +
         `</span>`;
     }).join('');
@@ -277,8 +279,9 @@
     const tabUrl         = proto?.tabUrl ?? null;
     const tabFallback    = proto?.tabFallback ?? false;
     const isRuntimeTabWeb = runtimeOpenMode === 'tab-web' && !tabFallback;
-    const showHostedView  = isRuntimeTabWeb && !!tabUrl;
-    const isTabWebLoading = isRuntimeTabWeb && isRunning && !showHostedView;
+    const tabError = proto?.tabError || '';
+    const showHostedView  = isRuntimeTabWeb && !!tabUrl && !tabError && !proto?.tabLoading;
+    const isTabWebLoading = isRuntimeTabWeb && isRunning && !showHostedView && !tabError;
 
     // Decide what chrome the user should see for this session.
     //   embedded — true Foxy app: hosted view owns the body region.
@@ -303,7 +306,7 @@
       state.activeHostedSlug = slug;
       // While a modal is open the view is detached on purpose — don't
       // re-attach until the modal closes (popModalState handles that).
-      if (!isModalOpen()) attachHostedRO(slug);
+      if (!isModalOpen() && (prevSlug !== slug || !_hostedRO)) attachHostedRO(slug);
       return;
     }
 
@@ -329,12 +332,14 @@
       : isRunning ? 'Running'
       : 'Launch';
     const launchAction = !installed ? 'install' : (isRunning && !isTabWebLoading) ? 'focus' : 'launch';
-    const launchDisabled = isLaunching || busy === 'installing' || isTabWebLoading;
+    const launchDisabled = !!busy || isLaunching || isTabWebLoading;
     let sessionNote;
-    if (isRuntimeTabWeb && isRunning) {
+    if (tabError) {
+      sessionNote = `<p class="foxy-session-note">App UI unavailable: ${escapeAttr(tabError)}</p>`;
+    } else if (isRuntimeTabWeb && isRunning) {
       sessionNote = `<div class="foxy-tabweb-loading"><span class="foxy-tabweb-loading-text">Loading app UI…</span></div>`;
     } else if (runtimeOpenMode === 'tab-web' && tabFallback) {
-      sessionNote = `<p class="foxy-session-note">App opened externally — it was unable to load inside Nexus.</p>`;
+      sessionNote = `<p class="foxy-session-note">This app could not load inside Nexus. Use its external window if available.</p>`;
     } else {
       sessionNote = `<p class="foxy-session-note">The app runs as a separate window outside Cove Nexus. Switch to it in your OS taskbar to use it.</p>`;
     }
@@ -349,6 +354,7 @@
         </div>
       </div>
       <div class="foxy-session-actions">
+        ${tabError && proto?.tabRecoverable ? `<button class="btn btn-primary" data-action="recover" data-slug="${slug}"${busy ? ' disabled' : ''}>${busy === 'recovering' ? 'Retrying…' : 'Retry app UI'}</button>` : ''}
         <button class="btn btn-primary" data-action="${launchAction}" data-slug="${slug}"${launchDisabled ? ' disabled' : ''}>
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
           ${launchLabel}
@@ -428,6 +434,7 @@
     else if (action === 'launch') doLaunch(prog);
     else if (action === 'install') doInstall(prog);
     else if (action === 'update') doUpdate(prog);
+    else if (action === 'recover') doRecoverTab(prog);
     else if (action === 'reveal' && IS_DESKTOP) coveAPI.revealInstall(prog.slug);
   });
 
@@ -511,6 +518,8 @@
     if (busy === 'launching')  return { label: 'Launching…',  disabled: true, spin: true };
     if (busy === 'updating')   return { label: 'Updating…',   disabled: true, spin: true };
     if (!installed) return { label: 'Install', action: 'install' };
+    // Launch also focuses an existing process or restores its closed hosted tab.
+    if (processStatusFor(p.slug) === 'running') return { label: 'Running', action: 'launch' };
     return { label: 'Launch', action: 'launch' };
   }
 
@@ -795,6 +804,7 @@
     if (state.busy[slug]) return;
     state.busy[slug] = 'launching';
     render();
+    let externalLaunch = false;
     try {
       if (IS_DESKTOP) {
         const launchMode = (prog.openMode === 'tab-web' && !state.foxyMode) ? undefined : prog.openMode;
@@ -805,16 +815,32 @@
           return;
         }
         if (!res.ok) throw new Error(res.error || 'launch failed');
+        externalLaunch = res.openMode === 'external';
         toast(`${prog.name} launched (${res.kind})`);
       } else {
         await new Promise(r => setTimeout(r, 900));
       }
-      if (state.foxyMode) { ensureTab(prog); }
+      if (state.foxyMode && !externalLaunch) { ensureTab(prog); }
     } catch (e) {
       toast(`Launch failed: ${e.message}`, 'error');
     } finally {
       state.busy[slug] = null;
       render();
+    }
+  }
+
+  async function doRecoverTab(prog) {
+    if (!IS_DESKTOP || !coveAPI.recoverTabWeb || state.busy[prog.slug]) return;
+    state.busy[prog.slug] = 'recovering';
+    renderToolSession();
+    try {
+      const res = await coveAPI.recoverTabWeb(prog.slug);
+      if (!res?.ok) throw new Error(res?.error || 'could not reload app UI');
+    } catch (e) {
+      toast(`Retry failed: ${e.message}`, 'error');
+    } finally {
+      state.busy[prog.slug] = null;
+      renderToolSession();
     }
   }
 
@@ -1805,13 +1831,14 @@
       } catch {}
       // Files a hosted (Foxy tab) app downloads are saved by main; surface
       // where they landed so an in-tab export isn't silent.
-      coveAPI.onHostedDownload?.(({ slug, ok, filename, dir } = {}) => {
+      const unsubscribeDownloads = coveAPI.onHostedDownload?.(({ slug, ok, filename, dir } = {}) => {
         const prog = (window.PROGRAMS || []).find(p => p.slug === slug);
         const name = prog?.name || slug || 'App';
         if (ok) toast(`${name} saved ${filename} to ${dir || 'Downloads'}.`, 'success');
         else toast(`${name} download failed.`, 'error');
       });
-      coveAPI.onProcessUpdate(({ slug, previousStatus, state: s } = {}) => {
+      if (typeof unsubscribeDownloads === 'function') _unsubs.push(unsubscribeDownloads);
+      const unsubscribeProcesses = coveAPI.onProcessUpdate(({ slug, previousStatus, state: s } = {}) => {
         if (slug && s && typeof s === 'object') {
           state.processes[slug] = s;
 
@@ -1841,6 +1868,7 @@
           renderToolSession();
         }
       });
+      if (typeof unsubscribeProcesses === 'function') _unsubs.push(unsubscribeProcesses);
     }
     render();
     // Slow path: discover first so discovered programs (not in programs.js) are
