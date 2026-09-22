@@ -1544,31 +1544,56 @@
     if (typeof unsub === 'function') _unsubs.push(unsub);
   }
 
-  // Portable-only: new-version banner. Setup.exe and AppImage auto-update
-  // silently; Portable users need a nudge.
-  if (IS_DESKTOP && coveAPI.onSelfUpdateAvailable) {
-    const unsub = coveAPI.onSelfUpdateAvailable((payload) => {
-      if (!payload?.version) return;
-      const dismissed = (() => {
-        try { return localStorage.getItem('cove-self-update-dismissed') === payload.version; }
-        catch { return false; }
-      })();
-      if (dismissed) return;
-      const banner = document.getElementById('self-update-banner');
-      const verEl = document.getElementById('self-update-version');
-      const dl = document.getElementById('self-update-download');
-      const notes = document.getElementById('self-update-notes');
-      const close = document.getElementById('self-update-dismiss');
-      if (!banner) return;
-      if (verEl) verEl.textContent = `v${payload.version}`;
-      if (dl) dl.onclick = () => window.open(payload.downloadUrl || payload.htmlUrl, '_blank');
-      if (notes) notes.onclick = () => window.open(payload.htmlUrl, '_blank');
-      if (close) close.onclick = () => {
-        try { localStorage.setItem('cove-self-update-dismissed', payload.version); } catch {}
-        banner.classList.remove('show');
+  // Portable builds link to a download; installed builds ask before restarting.
+  function showSelfUpdate(payload) {
+    if (!payload?.version) return;
+    const downloaded = payload.state === 'downloaded';
+    const dismissalKey = `${payload.version}:${downloaded ? 'downloaded' : 'available'}`;
+    const dismissed = (() => {
+      try { return localStorage.getItem('cove-self-update-dismissed') === dismissalKey; }
+      catch { return false; }
+    })();
+    if (dismissed) return;
+    const banner = document.getElementById('self-update-banner');
+    const verEl = document.getElementById('self-update-version');
+    const dl = document.getElementById('self-update-download');
+    const notes = document.getElementById('self-update-notes');
+    const close = document.getElementById('self-update-dismiss');
+    const status = document.getElementById('self-update-state');
+    const detail = document.getElementById('self-update-detail');
+    if (!banner) return;
+    if (verEl) verEl.textContent = `v${payload.version}`;
+    if (status) status.textContent = downloaded ? 'is ready to install.' : 'is available.';
+    if (detail) detail.textContent = downloaded
+      ? 'Restart Cove Nexus when you are ready to finish updating.'
+      : 'Download the new Portable.exe and replace this one.';
+    if (dl) {
+      dl.textContent = downloaded ? 'Restart and update' : 'Download';
+      dl.onclick = async () => {
+        if (!downloaded) { window.open(payload.downloadUrl || payload.htmlUrl, '_blank'); return; }
+        dl.disabled = true;
+        try {
+          const res = await coveAPI.installSelfUpdate();
+          if (!res?.ok) throw new Error(res?.error || 'could not restart for update');
+        } catch (e) {
+          toast(`Update failed: ${e.message}`, 'error');
+        } finally {
+          dl.disabled = false;
+        }
       };
-      banner.classList.add('show');
-    });
+    }
+    if (notes) {
+      notes.hidden = !payload.htmlUrl;
+      notes.onclick = () => window.open(payload.htmlUrl, '_blank');
+    }
+    if (close) close.onclick = () => {
+      try { localStorage.setItem('cove-self-update-dismissed', dismissalKey); } catch {}
+      banner.classList.remove('show');
+    };
+    banner.classList.add('show');
+  }
+  if (IS_DESKTOP && coveAPI.onSelfUpdateAvailable) {
+    const unsub = coveAPI.onSelfUpdateAvailable(showSelfUpdate);
     if (typeof unsub === 'function') _unsubs.push(unsub);
   }
   window.addEventListener('beforeunload', () => { _unsubs.forEach(fn => fn()); });
@@ -1799,6 +1824,7 @@
           coveAPI.config.get(),
         ]);
         if (info?.version) state.appVersion = info.version;
+        if (info?.selfUpdate) showSelfUpdate(info.selfUpdate);
         if (info?.platform) {
           state.platform = info.platform;
           const plat = info.platform === 'win32' ? 'windows' : info.platform;

@@ -66,6 +66,7 @@ contextBridge.exposeInMainWorld('coveAPI', {
     ipcRenderer.on('cove:self:updateAvailable', h);
     return () => ipcRenderer.removeListener('cove:self:updateAvailable', h);
   },
+  installSelfUpdate: () => ipcRenderer.invoke('cove:self:installUpdate'),
 
   win: {
     close:            () => ipcRenderer.invoke('cove:window:close'),

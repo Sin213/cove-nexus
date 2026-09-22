@@ -18,6 +18,7 @@ const { tabReadyDecision, canResumeHostedView, isValidTabUrl } = require('./lib/
 const { captureStderr } = require('./lib/processes');
 const { effectiveOpenMode } = require('./lib/open-mode');
 const { buildHostedView } = require('./lib/hosted-view');
+const { createSelfUpdateController, hasActiveHostedSession } = require('./lib/self-update');
 
 const APP_ID = 'cove-nexus';
 const GITHUB_OWNER = 'Sin213';
@@ -49,6 +50,7 @@ fs.mkdirSync(USER_DATA, { recursive: true });
 
 let mainWindow = null;
 let tray = null;
+let selfUpdateController = null;
 // Flipped to true only from the tray "Quit" item so the close handler can
 // distinguish "user really wants out" from "user clicked ×".
 app.isQuitting = false;
@@ -367,10 +369,9 @@ function installAppImageUpdate(downloadedFile, appImagePath) {
 }
 
 // Silent auto-update: packaged builds only. Checks on boot and hourly.
-// When an update is downloaded, the app relaunches itself immediately
-// (Windows NSIS), or the AppImage is swapped in place and the new version
-// takes effect on next launch (Linux, see installAppImageUpdate above).
-// No prompt. No toast. Configured against github.com/Sin213/cove-nexus releases.
+// Windows installs automatically when no hosted session is active. Active
+// sessions get a restart action; Linux swaps the AppImage safely in place
+// and offers a restart when the user is ready.
 function setupAutoUpdater() {
   if (!app.isPackaged) return;
   if (isWindowsPortable()) { setupPortableUpdateNotifier(); return; }
@@ -379,19 +380,37 @@ function setupAutoUpdater() {
   catch { return; }
   autoUpdater.autoDownload = true;
   const appImagePath = process.platform === 'linux' ? process.env.APPIMAGE : '';
+  selfUpdateController = createSelfUpdateController({
+    autoInstall: !appImagePath,
+    hasActiveSession: () => hasActiveHostedSession(processRegistry.values()),
+    notify: payload => {
+      try { mainWindow?.webContents.send('cove:self:updateAvailable', payload); } catch {}
+    },
+    install: () => {
+      if (appImagePath) {
+        app.relaunch({ execPath: appImagePath, args: [] });
+        app.isQuitting = true;
+        app.quit();
+      } else {
+        autoUpdater.quitAndInstall(true, true);
+      }
+    },
+  });
   if (appImagePath) {
     // Keep autoInstallOnAppQuit off so electron-updater's broken doInstall
     // path (the EPIPE source) can never run on quit.
     autoUpdater.autoInstallOnAppQuit = false;
     autoUpdater.on('update-downloaded', (info) => {
-      try { installAppImageUpdate(info.downloadedFile, appImagePath); }
+      try {
+        installAppImageUpdate(info.downloadedFile, appImagePath);
+        selfUpdateController.downloaded(info.version);
+      }
       catch (err) { console.error('[cove-updater] install failed:', err?.message || err); }
     });
   } else {
     autoUpdater.autoInstallOnAppQuit = true;
-    autoUpdater.on('update-downloaded', () => {
-      try { autoUpdater.quitAndInstall(true, true); }
-      catch (err) { console.error('[cove-updater] quitAndInstall failed:', err?.message || err); }
+    autoUpdater.on('update-downloaded', (info) => {
+      selfUpdateController.downloaded(info.version);
     });
   }
   autoUpdater.on('error', (err) => {
@@ -435,9 +454,14 @@ function setupPortableUpdateNotifier() {
   };
   // Wait for the renderer before the first poke so the banner can actually
   // display when we find an update on cold start.
-  app.once('browser-window-created', (_e, win) => {
-    win.webContents.once('did-finish-load', check);
-  });
+  if (mainWindow) {
+    if (mainWindow.webContents.isLoading()) mainWindow.webContents.once('did-finish-load', check);
+    else check();
+  } else {
+    app.once('browser-window-created', (_e, win) => {
+      win.webContents.once('did-finish-load', check);
+    });
+  }
   setInterval(check, 60 * 60 * 1000);
 }
 
@@ -1698,7 +1722,11 @@ ipcMain.handle('cove:appInfo', () => ({
   name: app.getName(),
   packaged: app.isPackaged,
   platform: process.platform,
+  selfUpdate: selfUpdateController?.getState() || null,
 }));
+
+ipcMain.handle('cove:self:installUpdate', () => selfUpdateController?.installReady() ||
+  { ok: false, error: 'No downloaded update is ready.' });
 
 ipcMain.handle('cove:config:get', () => {
   const cfg = readConfig();
