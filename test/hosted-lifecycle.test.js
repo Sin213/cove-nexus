@@ -11,6 +11,7 @@ const rendererSource = fs.readFileSync(path.join(root, 'renderer', 'assets', 'la
 const {canResumeHostedView, tabReadyDecision, isValidTabUrl} = require(path.join(root, 'lib', 'tabweb'));
 const {buildHostedView} = require(path.join(root, 'lib', 'hosted-view'));
 const {effectiveOpenMode} = require(path.join(root, 'lib', 'open-mode'));
+const {captureStderr} = require(path.join(root, 'lib', 'processes'));
 
 function between(source, start, end) {
   const from = source.indexOf(start);
@@ -88,7 +89,7 @@ function hostedViewHarness() {
     app: {isPackaged: true}, crypto: {randomUUID: () => 'new-run'},
     readRegistry: () => ({[slug]: {path: '/tmp/cove-example.AppImage'}}),
     exists: () => true, slugToDisplayName: value => value,
-    createSocketServer: async () => '/tmp/cove-example.sock', effectiveOpenMode,
+    createSocketServer: async () => '/tmp/cove-example.sock', effectiveOpenMode, captureStderr,
     buildNexusEnv: () => ({}), buildLaunchEnv: () => ({}),
     planFromPath: file => ({cmd: file, args: [], kind: 'appimage'}),
     unblockExe() {}, spawn: () => child, path,
@@ -130,7 +131,7 @@ function freshLaunchHarness({platform = 'linux', socketPath = null} = {}) {
     exists: () => true, broadcastProcessUpdate() {},
     slugToDisplayName: value => value,
     createSocketServer: async () => socketPath,
-    effectiveOpenMode,
+    effectiveOpenMode, captureStderr,
     buildNexusEnv: () => ({}),
     buildLaunchEnv: () => ({}),
     planFromPath: file => ({cmd: file, args: [], kind: 'appimage'}),

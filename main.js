@@ -15,6 +15,7 @@ const { uniqueDownloadPath } = require('./lib/downloads');
 const { createJsonClient, createDownloader } = require('./lib/network');
 const { withInstallWorkspace, checksumForAsset, installAssetPath } = require('./lib/install-workspace');
 const { tabReadyDecision, canResumeHostedView, isValidTabUrl } = require('./lib/tabweb');
+const { captureStderr } = require('./lib/processes');
 const { effectiveOpenMode } = require('./lib/open-mode');
 const { buildHostedView } = require('./lib/hosted-view');
 
@@ -2065,18 +2066,7 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
       ...(isWinExe && { shell: true, windowsHide: true }),
     });
 
-    // Capture stderr briefly so immediate failures (missing DLL, AV block,
-    // bad exit) surface a real message. Capped at 4 KB; pipe destroyed
-    // after 5 s so long-running children are not tethered to Nexus.
-    let stderrBuf = '';
-    if (child.stderr) {
-      child.stderr.setEncoding('utf8');
-      child.stderr.on('data', (chunk) => {
-        if (stderrBuf.length < 4096) stderrBuf += chunk.slice(0, 4096 - stderrBuf.length);
-      });
-      const stderrTimer = setTimeout(() => { try { child.stderr.destroy(); } catch {} }, 5000);
-      child.stderr.once('close', () => clearTimeout(stderrTimer));
-    }
+    const stderrText = captureStderr(child.stderr);
 
     // Store child ref and capture pid immediately so fast-exiting processes
     // still preserve lastKnownPid in the exited registry entry.
@@ -2090,7 +2080,7 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
       // Ignore callbacks from a superseded launch: a newer run owns the slug.
       if (!prev || prev.runId !== runId || prev.status === 'failed') return;
       const prevStatus = prev.status;
-      const errSnippet = stderrBuf.trim().split('\n').slice(0, 3).join(' | ');
+      const errSnippet = stderrText().trim().split('\n').slice(0, 3).join(' | ');
       processRegistry.set(slug, {
         ...prev,
         child: null,
@@ -2186,7 +2176,7 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
         const pid = child.pid;
         if (pid && prev?.status === 'launching') {
           try { process.kill(pid, 0); } catch {
-            const errMsg = stderrBuf.trim().split('\n').slice(0, 3).join(' | ');
+            const errMsg = stderrText().trim().split('\n').slice(0, 3).join(' | ');
             processRegistry.set(slug, {
               ...prev, child: null,
               status: 'failed', pid,
@@ -2226,7 +2216,7 @@ ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
         const pid2 = cur.pid;
         if (!pid2) return;
         try { process.kill(pid2, 0); } catch {
-          const errMsg = stderrBuf.trim().split('\n').slice(0, 3).join(' | ');
+          const errMsg = stderrText().trim().split('\n').slice(0, 3).join(' | ');
           const curStatus = cur.status;
           processRegistry.set(slug, {
             ...cur, child: null,
