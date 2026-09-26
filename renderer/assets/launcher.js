@@ -560,6 +560,13 @@
     return { label: 'Launch', action: 'launch' };
   }
 
+  function primaryButtonHtml(btn) {
+    return `<button class="btn btn-sm btn-primary" data-action="${btn.action || ''}" ${btn.disabled ? 'disabled style="opacity:.6;cursor:default"' : ''}>
+              ${btn.spin ? '<svg class="ico spin-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.55"/></svg>' : ''}
+              ${btn.label}
+            </button>`;
+  }
+
   // Returns { kind: 'ok'|'update'|'unknown'|'none', text: string } for the status pill.
   function statusFor(p) {
     const installed = isInstalled(p);
@@ -684,10 +691,7 @@
           </span>
           <div style="display:flex;gap:6px;align-items:center;">
             ${updateBtnHtml}
-            <button class="btn btn-sm btn-primary" data-action="${btn.action || ''}" ${btn.disabled ? 'disabled style="opacity:.6;cursor:default"' : ''}>
-              ${btn.spin ? '<svg class="ico spin-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.55"/></svg>' : ''}
-              ${btn.label}
-            </button>
+            ${primaryButtonHtml(btn)}
             <button class="icon-btn" data-action="menu" aria-label="More">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg>
             </button>
@@ -697,6 +701,7 @@
     `;
   }
 
+  let _statusRenderingGridOnly = false;
   function render() {
     const list = filtered();
     if (list.length === 0 && state.filter === 'cat-bookmarks') {
@@ -743,7 +748,7 @@
     renderUpdateBanner(updates);
     renderFeatured();
     renderTabs();
-    renderToolSession();
+    if (!_statusRenderingGridOnly) renderToolSession();
     if (pinOverlay?.classList.contains('open')) syncPinModalControls();
   }
 
@@ -1356,9 +1361,71 @@
     return false;
   }
 
+  function patchProcessInPlace(slug) {
+    const cardEl = grid.querySelector(`.card[data-slug="${slug}"]`);
+    if (!cardEl) return false;
+    const prog = window.PROGRAMS.find(p => p.slug === slug);
+    if (!prog) return false;
+    const button = cardEl.querySelector('.btn-primary');
+    const tmp = document.createElement('div');
+    tmp.innerHTML = primaryButtonHtml(primaryButton(prog));
+    button?.replaceWith(tmp.firstElementChild);
+
+    const dot = cardEl.querySelector('.card-running-dot');
+    if (state.foxyMode && processStatusFor(slug) === 'running') {
+      if (!dot) cardEl.querySelector('.card-top')?.insertAdjacentHTML('afterbegin', '<span class="card-running-dot" aria-label="Running" title="Running"></span>');
+    } else {
+      dot?.remove();
+    }
+    return true;
+  }
+
+  const _pendingProcessSlugs = new Set();
+  const _pendingProgressSlugs = new Set();
+  let _statusFrame = null;
+  const lastPhase = {};
+
+  function progressPhaseChangedForFrame(slug) {
+    const phase = state.progress[slug]?.phase;
+    const phaseChanged = lastPhase[slug] !== phase;
+    lastPhase[slug] = phase;
+    return phaseChanged;
+  }
+
+  function scheduleStatusPatch(slug, kind) {
+    (kind === 'process' ? _pendingProcessSlugs : _pendingProgressSlugs).add(slug);
+    if (_statusFrame !== null) return;
+    _statusFrame = requestAnimationFrame(() => {
+      _statusFrame = null;
+      const processSlugs = [..._pendingProcessSlugs];
+      const progressSlugs = [..._pendingProgressSlugs];
+      _pendingProcessSlugs.clear();
+      _pendingProgressSlugs.clear();
+      let needsRender = false;
+      for (const pendingSlug of progressSlugs) {
+        try { if (progressPhaseChangedForFrame(pendingSlug)) needsRender = true; } catch (err) { console.error('Progress status patch failed:', pendingSlug, err); }
+      }
+      if (!needsRender) {
+        for (const pendingSlug of processSlugs) {
+          try { patchProcessInPlace(pendingSlug); } catch (err) { console.error('Process status patch failed:', pendingSlug, err); }
+        }
+        for (const pendingSlug of progressSlugs) {
+          try { patchProgressInPlace(pendingSlug); } catch (err) { console.error('Progress status patch failed:', pendingSlug, err); }
+        }
+      }
+      const activeTab = state.tabs.find(t => t.id === state.activeTabId);
+      const activeAffected = activeTab && (processSlugs.includes(activeTab.slug) || progressSlugs.includes(activeTab.slug));
+      if (needsRender) {
+        _statusRenderingGridOnly = true;
+        try { render(); } finally { _statusRenderingGridOnly = false; }
+      }
+      if (processSlugs.length && state.foxyMode && !needsRender) renderTabs();
+      if (activeAffected) renderToolSession();
+    });
+  }
+
   const _unsubs = [];
   if (IS_DESKTOP && coveAPI.onInstallProgress) {
-    let lastPhase = {};
     const unsub = coveAPI.onInstallProgress((ev) => {
       if (!ev?.slug) return;
       const prev = state.progress[ev.slug];
@@ -1371,10 +1438,7 @@
         // Clear after a beat so the bar momentarily shows "Done" / "Failed".
         setTimeout(() => { delete state.progress[ev.slug]; render(); }, 400);
       }
-      const phaseChanged = lastPhase[ev.slug] !== ev.phase;
-      lastPhase[ev.slug] = ev.phase;
-      if (phaseChanged) render();
-      else patchProgressInPlace(ev.slug);
+      scheduleStatusPatch(ev.slug, 'progress');
     });
     if (typeof unsub === 'function') _unsubs.push(unsub);
   }
@@ -2051,8 +2115,7 @@
             toast(msg, kind);
           }
 
-          render();
-          renderToolSession();
+          scheduleStatusPatch(slug, 'process');
         }
       });
       if (typeof unsubscribeProcesses === 'function') _unsubs.push(unsubscribeProcesses);

@@ -36,6 +36,16 @@ function element() {
     set(html) {
       this.html = html;
       this.writes++;
+      this.firstElementChild = /^<(?:button|div)\b/i.test(html.trim()) ? element() : null;
+      if (this.firstElementChild) this.firstElementChild.html = html;
+      for (const key of this.selectors.keys()) {
+        if (key.startsWith('.card[data-slug=')) this.selectors.delete(key);
+      }
+      for (const match of html.matchAll(/<article\b[^>]*\bdata-slug="([^"]+)"[^>]*>[\s\S]*?<\/article>/g)) {
+        if (/<article\b[^>]*\bclass="card(?:\s|")/.test(match[0])) {
+          this.selectors.set(`.card[data-slug="${match[1]}"]`, cardElement(match[0]));
+        }
+      }
       this.selectors.delete('.foxy-proto-block');
       this.selectors.delete('.foxy-proto-content');
       const divs = [];
@@ -69,10 +79,53 @@ function element() {
   return node;
 }
 
+function cardElement(html) {
+  const card = element();
+  card.html = html;
+  card.patches = {button: 0, dot: 0, progress: 0};
+  const track = (selector, node, kind) => {
+    card.selectors.set(selector, node);
+    node.replaceWith = fresh => {
+      card.patches[kind]++;
+      track(selector, fresh, kind);
+    };
+    node.remove = () => {
+      card.patches[kind]++;
+      card.selectors.delete(selector);
+    };
+  };
+  if (html.includes('class="card-top"')) {
+    const top = element();
+    card.selectors.set('.card-top', top);
+    top.insertAdjacentHTML = (_where, html) => {
+      card.patches.dot++;
+      if (html.includes('class="card-running-dot"')) track('.card-running-dot', element(), 'dot');
+    };
+  }
+  if (html.includes('class="card-running-dot"')) track('.card-running-dot', element(), 'dot');
+  if (html.includes('class="card-desc"')) {
+    const desc = element();
+    card.selectors.set('.card-desc', desc);
+    desc.insertAdjacentHTML = (_where, html) => {
+      card.patches.progress++;
+      if (/class="card-progress(?:\s|")/.test(html)) track('.card-progress', element(), 'progress');
+    };
+  }
+  if (/class="card-progress(?:\s|")/.test(html)) track('.card-progress', element(), 'progress');
+  const buttonHtml = /<button class="btn btn-sm btn-primary"[\s\S]*?<\/button>/.exec(html)?.[0];
+  if (buttonHtml) {
+    const button = element();
+    button.html = buttonHtml;
+    track('.btn-primary', button, 'button');
+  }
+  return card;
+}
+
 function harness(overrides = {}) {
   const nodes = new Map();
   const get = id => { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); };
   const frames = [];
+  const errors = [];
   const subscriptions = {};
   const storage = new Map();
   const api = {
@@ -97,6 +150,7 @@ function harness(overrides = {}) {
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     requestAnimationFrame: callback => { frames.push(callback); return frames.length; },
     cancelAnimationFrame() {}, setTimeout() {}, setInterval() {},
+    console: {error: (...args) => errors.push(args)},
     ResizeObserver: class { constructor() { observers++; } observe() {} disconnect() {} },
   };
   vm.createContext(context);
@@ -105,10 +159,10 @@ function harness(overrides = {}) {
   assert(source.includes(marker), 'test startup hook matches renderer entry point');
   vm.runInContext(source.replace(marker, `  globalThis.renderer = {
     state, init, rescan, beginAction, doInstall, doUpdate, doUninstall, doChangePath, doUpdateAll, isInstalled, hasUpdate,
-    card, doLaunch, renderToolSession, doRecoverTab, openPinModal, discoverAndMerge, doRefresh
+    card, render, doLaunch, renderToolSession, doRecoverTab, openPinModal, discoverAndMerge, doRefresh
   };\n})();`), context);
   return {
-    ...context.renderer, api, window: context.window, get, subscriptions, frames,
+    ...context.renderer, api, window: context.window, get, subscriptions, frames, errors,
     observers: () => observers,
     flush: () => { const ready = frames.splice(0); ready.forEach(fn => fn()); },
     messages: () => get('toast-host').children.map(child => child.textContent),
@@ -121,6 +175,207 @@ const deferred = () => {
   return {promise, resolve};
 };
 const program = slug => ({slug, name: slug, icon: 'upscale', version: '1.0.0'});
+
+async function statusHarness(slugs = ['cove-a', 'cove-b', 'cove-c', 'cove-d']) {
+  const h = harness();
+  await h.init();
+  h.window.PROGRAMS = slugs.map(program);
+  h.state.onDisk = new Set(slugs);
+  h.render();
+  h.flush();
+  h.cardFor = slug => h.get('grid').querySelector(`.card[data-slug="${slug}"]`);
+  h.process = (slug, status = 'running', protocol) => h.subscriptions.process({slug, state: {status, openMode: 'external', protocol}});
+  h.progress = (slug, received, phase = 'download') => h.subscriptions.progress({slug, phase, received, total: 100});
+  return h;
+}
+
+test('fake card selectors require matching markup', () => {
+  const grid = element();
+  grid.innerHTML = '<article class="card-other" data-slug="broken"><div class="card-top"></div></article>';
+  assert.equal(grid.querySelector('.card[data-slug="broken"]'), null);
+
+  grid.innerHTML = '<article class="card" data-slug="broken"><div class="renamed-top"></div><div class="renamed-desc"></div><button class="btn btn-sm btn-secondary">Launch</button></article>';
+  const card = grid.querySelector('.card[data-slug="broken"]');
+  assert(card);
+  for (const selector of ['.card-top', '.card-desc', '.btn-primary', '.card-running-dot', '.card-progress']) {
+    assert.equal(card.querySelector(selector), null, `${selector} must be absent`);
+  }
+});
+
+test('fake card selectors require matching inserted markup', () => {
+  const card = cardElement('<article class="card"><div class="card-top"></div><div class="card-desc"></div></article>');
+  card.querySelector('.card-top').insertAdjacentHTML('afterbegin', '<span class="wrong-class"></span>');
+  card.querySelector('.card-desc').insertAdjacentHTML('afterend', '<div class="card-progress-other"></div>');
+  assert.equal(card.querySelector('.card-running-dot'), null);
+  assert.equal(card.querySelector('.card-progress'), null);
+
+  card.querySelector('.card-top').insertAdjacentHTML('afterbegin', '<span class="card-running-dot"></span>');
+  card.querySelector('.card-desc').insertAdjacentHTML('afterend', '<div class="card-progress active"></div>');
+  assert(card.querySelector('.card-running-dot'));
+  assert(card.querySelector('.card-progress'));
+});
+
+test('status events share one animation frame across process and progress streams', async () => {
+  const h = await statusHarness();
+  for (const slug of ['cove-a', 'cove-b', 'cove-c']) {
+    h.process(slug);
+    h.progress(slug, 10);
+  }
+  assert.equal(h.frames.length, 1);
+  h.flush();
+  assert.equal(h.frames.length, 0);
+});
+
+test('duplicate status events patch each slug once per frame', async () => {
+  const h = await statusHarness();
+  h.progress('cove-a', 10);
+  h.flush();
+  const card = h.cardFor('cove-a');
+  h.process('cove-a');
+  h.process('cove-a', 'launching');
+  h.process('cove-a', 'running');
+  h.progress('cove-a', 20);
+  h.progress('cove-a', 30);
+  h.flush();
+  assert.equal(card.patches.button, 1);
+  assert.equal(card.patches.progress, 1);
+});
+
+test('one frame patches every pending slug and leaves unrelated cards alone', async () => {
+  const h = await statusHarness();
+  const cards = new Map(['cove-a', 'cove-b', 'cove-c', 'cove-d'].map(slug => [slug, h.cardFor(slug)]));
+  for (const slug of ['cove-a', 'cove-b', 'cove-c']) h.process(slug);
+  h.flush();
+  for (const slug of ['cove-a', 'cove-b', 'cove-c']) {
+    assert.equal(cards.get(slug).patches.button, 1);
+    assert.equal(h.cardFor(slug), cards.get(slug));
+  }
+  assert.equal(cards.get('cove-d').patches.button, 0);
+});
+
+test('mixed status streams use their own patch paths and preserve other cards', async () => {
+  const h = await statusHarness();
+  h.progress('cove-b', 10);
+  h.flush();
+  const a = h.cardFor('cove-a');
+  const b = h.cardFor('cove-b');
+  const c = h.cardFor('cove-c');
+  h.process('cove-a');
+  h.progress('cove-b', 20);
+  h.flush();
+  assert.equal(a.patches.button, 1);
+  assert.equal(a.patches.progress, 0);
+  assert.equal(b.patches.button, 0);
+  assert.equal(b.patches.progress, 1);
+  assert.equal(c.patches.button, 0);
+  assert.equal(c.patches.progress, 0);
+  assert.equal(h.cardFor('cove-b'), b);
+});
+
+test('a progress phase change skips process patches before rebuilding the grid', async () => {
+  const h = await statusHarness();
+  h.progress('cove-b', 10);
+  h.flush();
+  const grid = h.get('grid');
+  const writes = grid.writes;
+  const oldProcessCard = h.cardFor('cove-a');
+  const oldProgressCard = h.cardFor('cove-b');
+  h.process('cove-a', 'running');
+  h.progress('cove-b', 20, 'install');
+  h.flush();
+  assert.equal(oldProcessCard.patches.button, 0);
+  assert.equal(oldProgressCard.patches.progress, 0);
+  assert.equal(grid.writes, writes + 1);
+  const processCard = h.cardFor('cove-a');
+  const progressCard = h.cardFor('cove-b');
+  assert.notEqual(processCard, oldProcessCard);
+  assert.match(processCard.querySelector('.btn-primary').html, /Running/);
+  assert(progressCard.querySelector('.card-progress'));
+  assert.match(progressCard.html, /Installing…/);
+});
+
+test('inactive process updates do not rewrite the active tool session', async () => {
+  const h = await statusHarness();
+  h.state.foxyMode = true;
+  h.state.tabs = [{id: 'cove-a', slug: 'cove-a'}, {id: 'cove-b', slug: 'cove-b'}];
+  h.state.activeTabId = 'cove-a';
+  h.state.processes['cove-a'] = {status: 'running', openMode: 'external', protocol: {progress: 10}};
+  h.renderToolSession();
+  const session = h.get('foxy-session');
+  const protocol = session.querySelector('.foxy-proto-content');
+  const writes = session.writes;
+  h.process('cove-b', 'running', {progress: 90});
+  h.flush();
+  assert.equal(session.writes, writes);
+  assert.equal(session.querySelector('.foxy-proto-content'), protocol);
+  assert.equal(protocol.writes, 0);
+  assert.match(session.innerHTML, /cove-a/);
+});
+
+test('batched process updates refresh Foxy tab lifecycle labels once', async () => {
+  const h = await statusHarness();
+  h.state.foxyMode = true;
+  h.state.tabs = [
+    {id: 'home', kind: 'home', title: 'Home'},
+    {id: 'cove-a', slug: 'cove-a', title: 'Cove A'},
+    {id: 'cove-b', slug: 'cove-b', title: 'Cove B'},
+  ];
+  h.render();
+  const tabs = h.get('foxy-tabs');
+  const writes = tabs.writes;
+  const a = h.cardFor('cove-a');
+  h.process('cove-a', 'running');
+  h.process('cove-b', 'failed');
+  h.flush();
+  assert.equal(tabs.writes, writes + 1);
+  assert.match(tabs.innerHTML, /data-process-status="running" title="Cove A — Running"/);
+  assert.match(tabs.innerHTML, /data-process-status="failed" title="Cove B — Failed"/);
+  assert(a.querySelector('.card-running-dot'));
+  h.process('cove-a', 'not_running');
+  h.flush();
+  assert.equal(a.querySelector('.card-running-dot'), null);
+  assert.match(tabs.innerHTML, /data-process-status="not_running" title="Cove A — Not running"/);
+});
+
+test('a completed status frame permits exactly one new frame', async () => {
+  const h = await statusHarness();
+  h.process('cove-a');
+  assert.equal(h.frames.length, 1);
+  h.flush();
+  h.process('cove-b');
+  h.process('cove-c');
+  assert.equal(h.frames.length, 1);
+  h.flush();
+  assert.equal(h.cardFor('cove-b').patches.button, 1);
+});
+
+test('a throwing patch leaves other slugs and later frames working', async () => {
+  const h = await statusHarness();
+  h.cardFor('cove-a').querySelector('.btn-primary').replaceWith = () => { throw new Error('bad card'); };
+  h.process('cove-a');
+  h.process('cove-b');
+  h.flush();
+  assert.equal(h.errors.length, 1);
+  assert.equal(h.cardFor('cove-b').patches.button, 1);
+  h.process('cove-c');
+  assert.equal(h.frames.length, 1);
+  h.flush();
+  assert.equal(h.cardFor('cove-c').patches.button, 1);
+});
+
+test('same-phase progress ticks patch one card without rebuilding the grid', async () => {
+  const h = await statusHarness();
+  h.progress('cove-a', 10);
+  h.flush();
+  const grid = h.get('grid');
+  const writes = grid.writes;
+  const card = h.cardFor('cove-a');
+  h.progress('cove-a', 20);
+  h.flush();
+  assert.equal(grid.writes, writes);
+  assert.equal(h.cardFor('cove-a'), card);
+  assert.equal(card.patches.progress, 1);
+});
 
 test('offline cold start renders an installed tool absent from the static catalog', async () => {
   const slug = 'cove-offline-only';
