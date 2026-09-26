@@ -716,6 +716,7 @@
     renderFeatured();
     renderTabs();
     renderToolSession();
+    if (pinOverlay?.classList.contains('open')) syncPinModalControls();
   }
 
   function renderUpdateBanner(updates) {
@@ -1762,6 +1763,16 @@
   const pinSub       = document.getElementById('pin-sub');
   let pinProg = null;
   let pinSelectedTag = '';
+  let _pinOpenSequence = 0;
+
+  function syncPinModalControls() {
+    const busy = pinProg ? state.busy[pinProg.slug] : null;
+    pinConfirm.disabled = busy ? true : !pinSelectedTag;
+    pinConfirm.textContent = busy === 'pinning' ? 'Pinning…' : 'Pin';
+    pinUnpin.style.display = pinProg?.pinnedTag ? 'inline-block' : 'none';
+    pinUnpin.disabled = !!busy;
+    pinUnpin.textContent = busy === 'unpinning' ? 'Unpinning…' : 'Unpin';
+  }
 
   function closePinModal() {
     const wasOpen = pinOverlay?.classList.contains('open');
@@ -1773,19 +1784,20 @@
 
   async function openPinModal(prog) {
     if (!IS_DESKTOP || !pinOverlay) return;
+    const sequence = ++_pinOpenSequence;
     const wasOpen = pinOverlay.classList.contains('open');
     pinProg = prog;
     pinSelectedTag = '';
     pinTitle.textContent = `Pin ${prog.name}`;
     pinSub.textContent = 'Select a release to install. Cove Nexus will stay on this version until you unpin.';
     pinList.innerHTML = '<div class="empty">Loading releases…</div>';
-    pinConfirm.disabled = true;
-    pinUnpin.style.display = prog.pinnedTag ? 'inline-block' : 'none';
     pinOverlay.classList.add('open');
+    syncPinModalControls();
     if (!wasOpen) pushModalState();
 
     try {
       const res = await coveAPI.releases(prog.slug);
+      if (sequence !== _pinOpenSequence || pinProg !== prog || !pinOverlay.classList.contains('open')) return;
       if (!res?.ok) throw new Error(res?.error || 'failed');
       const rows = res.releases.filter(r => r.hasAsset);
       if (!rows.length) { pinList.innerHTML = '<div class="empty">No releases with compatible assets for this platform.</div>'; return; }
@@ -1812,10 +1824,11 @@
           row.classList.add('selected');
           const idx = parseInt(row.dataset.i, 10);
           pinSelectedTag = Number.isInteger(idx) ? tagByIndex[idx] : null;
-          pinConfirm.disabled = !pinSelectedTag;
+          syncPinModalControls();
         });
       });
     } catch (e) {
+      if (sequence !== _pinOpenSequence || pinProg !== prog || !pinOverlay.classList.contains('open')) return;
       pinList.innerHTML = `<div class="empty">Couldn't load releases: ${escapeAttr(e.message)}</div>`;
     }
   }
@@ -1826,22 +1839,26 @@
     if (!pinProg || !pinSelectedTag) return;
     const slug = pinProg.slug;
     const prog = pinProg;
-    pinConfirm.disabled = true;
-    pinConfirm.textContent = 'Pinning…';
+    const sequence = _pinOpenSequence;
+    if (!beginAction(slug, 'pinning')) return;
+    render();
+    syncPinModalControls();
     try {
       const res = await coveAPI.pin(slug, pinSelectedTag);
       if (!res?.ok) throw new Error(res?.error || 'pin failed');
       toast(`${prog.name} pinned to ${res.tag}`);
       state.installedOverride[slug] = true;
       state.remoteUpdates.delete(slug);
-      closePinModal();
-      await rescan();
-      render();
+      if (sequence === _pinOpenSequence && pinProg === prog && pinOverlay.classList.contains('open')) {
+        closePinModal();
+      }
     } catch (e) {
       toast(`Pin failed: ${e.message}`, 'error');
-      pinConfirm.disabled = false;
     } finally {
-      pinConfirm.textContent = 'Pin';
+      state.busy[slug] = null;
+      syncPinModalControls();
+      await rescan();
+      render();
     }
   });
   let _updateAllBusy = false;
@@ -1885,15 +1902,24 @@
     if (!pinProg) return;
     const slug = pinProg.slug;
     const prog = pinProg;
+    const sequence = _pinOpenSequence;
+    if (!beginAction(slug, 'unpinning')) return;
+    render();
+    syncPinModalControls();
     try {
       const res = await coveAPI.unpin(slug);
       if (!res?.ok) throw new Error(res?.error || 'unpin failed');
       toast(`${prog.name} unpinned`);
-      closePinModal();
-      await rescan();
-      render();
+      if (sequence === _pinOpenSequence && pinProg === prog && pinOverlay.classList.contains('open')) {
+        closePinModal();
+      }
     } catch (e) {
       toast(`Unpin failed: ${e.message}`, 'error');
+    } finally {
+      state.busy[slug] = null;
+      syncPinModalControls();
+      await rescan();
+      render();
     }
   });
 

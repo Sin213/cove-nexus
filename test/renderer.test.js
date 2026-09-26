@@ -77,7 +77,7 @@ function harness(overrides = {}) {
   assert(source.includes(marker), 'test startup hook matches renderer entry point');
   vm.runInContext(source.replace(marker, `  globalThis.renderer = {
     state, init, rescan, beginAction, doInstall, doUpdate, doUninstall, doChangePath, doUpdateAll, isInstalled, hasUpdate,
-    card, doLaunch, renderToolSession, doRecoverTab, discoverAndMerge, doRefresh
+    card, doLaunch, renderToolSession, doRecoverTab, openPinModal, discoverAndMerge, doRefresh
   };\n})();`), context);
   return {
     ...context.renderer, api, window: context.window, get, subscriptions, frames,
@@ -408,4 +408,304 @@ test('downloaded update displays from startup snapshot and restarts only on clic
   assert.equal(restarts, 0);
   await h.get('self-update-download').onclick();
   assert.equal(restarts, 1);
+});
+
+test('reopening the pin modal ignores an older request for the same program', async () => {
+  const first = deferred();
+  const second = deferred();
+  let calls = 0;
+  const h = harness({releases: () => (++calls === 1 ? first.promise : second.promise)});
+  const p = h.window.PROGRAMS[0];
+  const older = h.openPinModal(p);
+  h.get('pin-cancel').listeners.get('click')();
+  const newer = h.openPinModal(p);
+  second.resolve({ok: true, releases: [{tag: 'v2-current', hasAsset: true}]});
+  await newer;
+  assert.match(h.get('pin-tag-list').innerHTML, /v2-current/);
+  first.resolve({ok: true, releases: [{tag: 'v1-stale', hasAsset: true}]});
+  await older;
+  assert.match(h.get('pin-tag-list').innerHTML, /v2-current/);
+  assert.doesNotMatch(h.get('pin-tag-list').innerHTML, /v1-stale/);
+});
+
+test('pin modal disables both actions for every busy owner', async () => {
+  const h = harness({releases: async () => ({ok: true, releases: []})});
+  const p = {...program('cove-example'), pinnedTag: 'v1.0.0'};
+  h.window.PROGRAMS = [p];
+  for (const busy of ['installing', 'updating', 'removing', 'changing-path', 'pinning', 'unpinning']) {
+    h.state.busy[p.slug] = busy;
+    await h.openPinModal(p);
+    assert.equal(h.get('pin-confirm').disabled, true, `${busy} disables Pin`);
+    assert.equal(h.get('pin-unpin').disabled, true, `${busy} disables Unpin`);
+    h.get('pin-cancel').listeners.get('click')();
+  }
+  h.state.busy[p.slug] = null;
+});
+
+test('reopening the same tool preserves its in-flight unpin controls', async () => {
+  const pending = deferred();
+  const h = harness({
+    releases: async () => ({ok: true, releases: []}),
+    unpin: () => pending.promise,
+  });
+  const p = {...program('cove-example'), pinnedTag: 'v1.0.0'};
+  h.window.PROGRAMS = [p];
+  await h.openPinModal(p);
+  const button = h.get('pin-unpin');
+  assert.equal(button.disabled, false);
+  const unpinning = button.listeners.get('click')();
+  h.get('pin-cancel').listeners.get('click')();
+  await h.openPinModal(p);
+  assert.equal(h.state.busy[p.slug], 'unpinning');
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, 'Unpinning…');
+
+  pending.resolve({ok: true});
+  await unpinning;
+  assert.equal(h.get('pin-overlay').classList.contains('open'), true);
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, 'Unpin');
+});
+
+test('unpin exposes and clears its busy state', async () => {
+  const pending = deferred();
+  const h = harness({
+    releases: async () => ({ok: true, releases: []}),
+    unpin: () => pending.promise,
+  });
+  const p = {...h.window.PROGRAMS[0], pinnedTag: 'v1.0.0'};
+  await h.openPinModal(p);
+  const button = h.get('pin-unpin');
+  button.textContent = 'Unpin';
+  assert.equal(button.disabled, false);
+  const unpinning = button.listeners.get('click')();
+  assert.equal(h.state.busy[p.slug], 'unpinning');
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, 'Unpinning…');
+  pending.resolve({ok: true});
+  await unpinning;
+  assert.equal(h.state.busy[p.slug], null);
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, 'Unpin');
+});
+
+test('a stale unpin completion cannot close or mutate another tool modal', async () => {
+  const first = deferred();
+  const second = deferred();
+  let calls = 0;
+  const h = harness({
+    releases: async () => ({ok: true, releases: []}),
+    unpin: () => (++calls === 1 ? first.promise : second.promise),
+  });
+  const a = {...program('cove-a'), pinnedTag: 'v1.0.0'};
+  const b = {...program('cove-b'), pinnedTag: 'v2.0.0'};
+  h.window.PROGRAMS = [a, b];
+
+  await h.openPinModal(a);
+  const button = h.get('pin-unpin');
+  button.textContent = 'Unpin';
+  assert.equal(button.disabled, false);
+  const unpinA = button.listeners.get('click')();
+  h.get('pin-cancel').listeners.get('click')();
+  await h.openPinModal(b);
+  assert.equal(button.disabled, false);
+  const unpinB = button.listeners.get('click')();
+  assert.equal(button.textContent, 'Unpinning…');
+
+  first.resolve({ok: true});
+  await unpinA;
+  assert.equal(h.get('pin-overlay').classList.contains('open'), true);
+  assert.equal(h.get('pin-title').textContent, 'Pin cove-b');
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, 'Unpinning…');
+  assert.equal(h.state.busy[a.slug], null);
+  assert.equal(h.state.busy[b.slug], 'unpinning');
+
+  second.resolve({ok: true});
+  await unpinB;
+});
+
+test('opening another tool resets stale pin modal button state', async () => {
+  const pending = deferred();
+  const h = harness({
+    releases: async () => ({ok: true, releases: []}),
+    unpin: () => pending.promise,
+  });
+  const a = {...program('cove-a'), pinnedTag: 'v1.0.0'};
+  const b = {...program('cove-b'), pinnedTag: 'v2.0.0'};
+  h.window.PROGRAMS = [a, b];
+
+  await h.openPinModal(a);
+  const button = h.get('pin-unpin');
+  assert.equal(button.disabled, false);
+  const unpinA = button.listeners.get('click')();
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, 'Unpinning…');
+  h.get('pin-cancel').listeners.get('click')();
+  await h.openPinModal(b);
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, 'Unpin');
+
+  pending.resolve({ok: true});
+  await unpinA;
+});
+
+test('a stale pin completion cannot close or mutate another tool modal', async () => {
+  const first = deferred();
+  const second = deferred();
+  const firstScan = deferred();
+  const secondScan = deferred();
+  const pinCalls = [];
+  let scans = 0;
+  const h = harness({
+    releases: async slug => ({ok: true, releases: [{tag: `${slug}-tag`, hasAsset: true}]}),
+    pin: (slug, tag) => {
+      pinCalls.push({slug, tag});
+      return pinCalls.length === 1 ? first.promise : second.promise;
+    },
+    scan: () => (++scans === 1 ? firstScan.promise : secondScan.promise),
+  });
+  const a = program('cove-a');
+  const b = program('cove-b');
+  h.window.PROGRAMS = [a, b];
+  h.state.remoteUpdates.add(a.slug);
+  h.state.remoteUpdates.add(b.slug);
+  const row = element();
+  row.dataset.i = '0';
+  h.get('pin-tag-list').querySelectorAll = selector => selector === '.tag-row' ? [row] : [];
+
+  await h.openPinModal(a);
+  row.listeners.get('click')();
+  const button = h.get('pin-confirm');
+  assert.equal(button.disabled, false);
+  const pinA = button.listeners.get('click')();
+  h.get('pin-cancel').listeners.get('click')();
+  await h.openPinModal(b);
+  row.listeners.get('click')();
+  const bSub = h.get('pin-sub').textContent;
+  assert.equal(button.disabled, false);
+  const pinB = button.listeners.get('click')();
+  assert.deepEqual(pinCalls, [
+    {slug: a.slug, tag: 'cove-a-tag'},
+    {slug: b.slug, tag: 'cove-b-tag'},
+  ]);
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, 'Pinning…');
+
+  first.resolve({ok: true, tag: 'cove-a-tag'});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.get('pin-overlay').classList.contains('open'), true);
+  assert.equal(h.get('pin-title').textContent, 'Pin cove-b');
+  assert.equal(h.get('pin-sub').textContent, bSub);
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, 'Pinning…');
+  assert.equal(h.state.busy[a.slug], null);
+  assert.equal(h.state.busy[b.slug], 'pinning');
+  assert.equal(h.state.installedOverride[a.slug], true);
+  assert.equal(h.state.remoteUpdates.has(a.slug), false);
+
+  firstScan.resolve({installed: []});
+  await pinA;
+  second.resolve({ok: true, tag: 'cove-b-tag'});
+  await Promise.resolve();
+  secondScan.resolve({installed: []});
+  await pinB;
+});
+
+test('unpin renders its owned busy state while IPC is pending', async () => {
+  const pending = deferred();
+  const h = harness({
+    releases: async () => ({ok: true, releases: []}),
+    unpin: () => pending.promise,
+  });
+  const p = {...h.window.PROGRAMS[0], pinnedTag: 'v1.0.0'};
+  h.window.PROGRAMS = [p];
+  h.state.onDisk.add(p.slug);
+  await h.openPinModal(p);
+  const button = h.get('pin-unpin');
+  assert.equal(button.disabled, false);
+  const unpinning = button.listeners.get('click')();
+  assert.equal(h.state.busy[p.slug], 'unpinning');
+  assert.match(h.get('grid').innerHTML, /Working…/);
+  assert.equal(h.get('ft-primary').disabled, true);
+  pending.resolve({ok: true});
+  await unpinning;
+});
+
+test('pin ignores duplicate actions without clearing the first busy state', async () => {
+  const pending = deferred();
+  let calls = 0;
+  const h = harness({
+    releases: async () => ({ok: true, releases: [{tag: 'v1.0.0', hasAsset: true}]}),
+    pin: () => { calls++; return pending.promise; },
+  });
+  const p = h.window.PROGRAMS[0];
+  const row = element();
+  row.dataset.i = '0';
+  h.get('pin-tag-list').querySelectorAll = selector => selector === '.tag-row' ? [row] : [];
+  await h.openPinModal(p);
+  row.listeners.get('click')();
+  const button = h.get('pin-confirm');
+  const firstClick = button.listeners.get('click')();
+  const secondClick = button.listeners.get('click')();
+  assert.equal(calls, 1);
+  pending.resolve({ok: true, tag: 'v1.0.0'});
+  await firstClick;
+  await secondClick;
+});
+
+test('unpin ignores duplicate actions without clearing the first busy state', async () => {
+  const pending = deferred();
+  let calls = 0;
+  const h = harness({
+    releases: async () => ({ok: true, releases: []}),
+    unpin: () => { calls++; return pending.promise; },
+  });
+  const p = {...h.window.PROGRAMS[0], pinnedTag: 'v1.0.0'};
+  h.window.PROGRAMS = [p];
+  await h.openPinModal(p);
+  const button = h.get('pin-unpin');
+  const firstClick = button.listeners.get('click')();
+  const secondClick = button.listeners.get('click')();
+  assert.equal(calls, 1);
+  pending.resolve({ok: true});
+  await firstClick;
+  await secondClick;
+});
+
+test('pin modal controls resync when another action on the same tool completes', async () => {
+  const pending = deferred();
+  const h = harness({
+    releases: async () => ({ok: true, releases: []}),
+    update: () => pending.promise,
+  });
+  const p = {...h.window.PROGRAMS[0], pinnedTag: 'v1.0.0'};
+  h.window.PROGRAMS = [p];
+  const updating = h.doUpdate(p, {rescanAfter: false});
+  await h.openPinModal(p);
+  assert.equal(h.get('pin-unpin').disabled, true);
+  pending.resolve({ok: true});
+  await updating;
+  assert.equal(h.state.busy[p.slug], null);
+  assert.equal(h.get('pin-unpin').disabled, false);
+});
+
+test('unpin modal resyncs visibility after the trailing rescan clears pinnedTag', async () => {
+  const pending = deferred();
+  const h = harness({
+    releases: async () => ({ok: true, releases: []}),
+    unpin: () => pending.promise,
+    scan: async () => ({installed: [{slug: 'cove-example', pinnedTag: ''}]}),
+  });
+  const p = {...program('cove-example'), pinnedTag: 'v1.0.0'};
+  h.window.PROGRAMS = [p];
+  h.state.onDisk.add(p.slug);
+  await h.openPinModal(p);
+  const button = h.get('pin-unpin');
+  assert.equal(button.style.display, 'inline-block');
+  const unpinning = button.listeners.get('click')();
+  pending.resolve({ok: true});
+  await unpinning;
+  assert.equal(p.pinnedTag, '');
+  assert.equal(button.style.display, 'none');
 });
