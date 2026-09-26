@@ -11,6 +11,9 @@
   "homepage": "https://github.com/Sin213/cove-nexus",
   "scripts": {
     "start": "electron .",
+    "test": "node --test",
+    "lint": "eslint main.js portable.js preload.js eslint.config.js lib build test renderer",
+    "check": "npm run lint && npm test",
     "dist": "electron-builder",
     "dist:linux": "electron-builder --linux",
     "dist:win": "electron-builder --win",
