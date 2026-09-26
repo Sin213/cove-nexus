@@ -18,6 +18,7 @@
   let state = {
     filter: 'all',
     busy: {},
+    operationRevision: {},
     progress: {},
     installedOverride: {},
     updated: {},
@@ -43,6 +44,13 @@
 
   function iconFor(name) {
     return (window.ICONS && window.ICONS[name]) || window.ICONS.upscale;
+  }
+
+  function beginAction(slug, action) {
+    if (state.busy[slug]) return false;
+    state.busy[slug] = action;
+    state.operationRevision[slug] = (state.operationRevision[slug] || 0) + 1;
+    return true;
   }
 
   // ── Foxy Mode helpers ──────────────────────────────────────────────────────
@@ -517,6 +525,7 @@
     if (busy === 'installing') return { label: 'Installing…', disabled: true, spin: true };
     if (busy === 'launching')  return { label: 'Launching…',  disabled: true, spin: true };
     if (busy === 'updating')   return { label: 'Updating…',   disabled: true, spin: true };
+    if (busy) return { label: 'Working…', disabled: true, spin: true };
     if (!installed) return { label: 'Install', action: 'install' };
     // Launch also focuses an existing process or restores its closed hosted tab.
     if (processStatusFor(p.slug) === 'running') return { label: 'Running', action: 'launch' };
@@ -643,7 +652,7 @@
 
         <div class="card-bottom">
           <span class="status-pill ${status.kind}" title="${status.kind === 'update' ? 'Update available' : status.kind === 'ok' ? 'Up to date' : status.kind === 'unknown' ? 'Latest version unknown — GitHub may be rate-limited or offline' : 'Not installed'}">
-            <span class="dot"></span>${status.text}
+            <span class="dot"></span>${escapeAttr(status.text)}
           </span>
           <div style="display:flex;gap:6px;align-items:center;">
             ${updateBtnHtml}
@@ -728,6 +737,8 @@
     const date = document.getElementById('ft-date');
     const shot = document.getElementById('ft-screenshot');
     const primaryLabel = document.getElementById('ft-primary-label');
+    const primary = document.getElementById('ft-primary');
+    if (primary) primary.disabled = !!state.busy[prog.slug];
     // Prefer the upstream tag — the featured card showcases what's shipping
     // right now, not whatever the user has installed locally.
     const displayVer = (prog.latestTag || '').replace(/^v/, '');
@@ -744,6 +755,7 @@
       if (busy === 'installing') primaryLabel.textContent = 'Installing…';
       else if (busy === 'launching') primaryLabel.textContent = 'Launching…';
       else if (busy === 'updating') primaryLabel.textContent = 'Updating…';
+      else if (busy) primaryLabel.textContent = 'Working…';
       else if (!isInstalled(prog)) primaryLabel.textContent = 'Install';
       else if (hasUpdate(prog)) primaryLabel.textContent = 'Update now';
       else primaryLabel.textContent = 'Launch';
@@ -772,7 +784,7 @@
 
   async function doInstall(prog) {
     const slug = prog.slug;
-    state.busy[slug] = 'installing';
+    if (!beginAction(slug, 'installing')) return { ok: false, skipped: true };
     render();
     try {
       if (IS_DESKTOP) {
@@ -784,13 +796,15 @@
         await new Promise(r => setTimeout(r, 1200));
       }
       state.installedOverride[slug] = true;
+      return { ok: true };
     } catch (e) {
       toast(`Install failed: ${e.message}`, 'error');
+      return { ok: false, error: e.message };
     } finally {
       state.busy[slug] = null;
       render();
-      // Pick up manifest/update state on the freshly cloned repo.
-      if (IS_DESKTOP) { rescan().then(render); }
+      // Reconcile the completed installation with the local registry.
+      if (IS_DESKTOP) { await rescan(); render(); }
     }
   }
 
@@ -844,9 +858,9 @@
     }
   }
 
-  async function doUpdate(prog) {
+  async function doUpdate(prog, { rescanAfter = true } = {}) {
     const slug = prog.slug;
-    state.busy[slug] = 'updating';
+    if (!beginAction(slug, 'updating')) return { ok: false, skipped: true };
     render();
     try {
       if (IS_DESKTOP) {
@@ -859,21 +873,25 @@
       state.remoteUpdates.delete(slug);
       state.updated[slug] = true;
       prog.version = prog.newVersion || prog.version;
+      return { ok: true };
     } catch (e) {
       toast(`Update failed: ${e.message}`, 'error');
+      return { ok: false, error: e.message };
     } finally {
       state.busy[slug] = null;
       render();
-      if (IS_DESKTOP) { rescan().then(render); }
+      if (IS_DESKTOP && rescanAfter) { await rescan(); render(); }
     }
   }
 
   async function doUninstall(prog) {
     const slug = prog.slug;
+    if (!beginAction(slug, 'removing')) return { ok: false, skipped: true };
+    render();
     try {
       if (IS_DESKTOP) {
         const res = await coveAPI.uninstall(slug);
-        if (res.cancelled) return;
+        if (res.cancelled) return { ok: false, cancelled: true };
         if (!res.ok) throw new Error(res.error || 'uninstall failed');
         state.onDisk.delete(slug);
       }
@@ -881,8 +899,14 @@
       if (state.foxyMode) closeTab(slug);
       toast(`${prog.name} removed`);
       render();
+      return { ok: true };
     } catch (e) {
       toast(`Uninstall failed: ${e.message}`, 'error');
+      return { ok: false, error: e.message };
+    } finally {
+      state.busy[slug] = null;
+      if (IS_DESKTOP) await rescan();
+      render();
     }
   }
 
@@ -1066,17 +1090,23 @@
   }
 
   async function doChangePath(prog) {
-    if (!IS_DESKTOP) return;
+    if (!IS_DESKTOP) return { ok: false, skipped: true };
+    if (!beginAction(prog.slug, 'changing-path')) return { ok: false, skipped: true };
+    render();
     try {
       const res = await coveAPI.setCustomPath(prog.slug);
-      if (res?.cancelled) return;
+      if (res?.cancelled) return { ok: false, cancelled: true };
       if (!res?.ok) throw new Error(res?.error || 'failed');
       toast(`${prog.name}: using ${res.path.split('/').pop() || res.path}${res.tag ? ` (${res.tag})` : ''}`);
       state.installedOverride[prog.slug] = true;
-      await rescan();
-      render();
+      return { ok: true };
     } catch (e) {
       toast(`Couldn't set path: ${e.message}`, 'error');
+      return { ok: false, error: e.message };
+    } finally {
+      state.busy[prog.slug] = null;
+      await rescan();
+      render();
     }
   }
 
@@ -1332,6 +1362,30 @@
   // Static entries in programs.js win for icon/category; new repos get defaults.
   const DEFAULT_ICON = 'upscale'; // fallback until you add it to programs.js
 
+  function scanVersion(rawVersion) {
+    return (typeof rawVersion === 'string' || typeof rawVersion === 'number' ? String(rawVersion) : '').replace(/^v/, '');
+  }
+
+  // Installed tools must remain launchable when GitHub discovery is offline.
+  // Registry entries provide a minimum catalog; discovery enriches it later.
+  function mergeInstalledPrograms(rows) {
+    const known = new Set(window.PROGRAMS.map(p => p.slug));
+    for (const row of rows) {
+      const slug = typeof row === 'string' ? row : row?.slug;
+      if (typeof slug !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/i.test(slug) || known.has(slug)) continue;
+      window.PROGRAMS.push({
+        slug,
+        name: slug.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' '),
+        desc: 'Installed on this computer.',
+        icon: DEFAULT_ICON,
+        category: 'cat-utils',
+        version: typeof row === 'object' ? scanVersion(row.version) : '',
+        localOnly: true,
+      });
+      known.add(slug);
+    }
+  }
+
   // Persist which discovered slugs we've seen so we only toast on genuinely new ones.
   const SEEN_REPO_SLUGS_KEY = 'cove-seen-repo-slugs';
   function getSeenRepoSlugs() {
@@ -1352,6 +1406,10 @@
       for (const r of res.repos) {
         const existing = bySlug.get(r.slug);
         if (existing) {
+          if (existing.localOnly) {
+            if (r.name) existing.name = r.name;
+            existing.localOnly = false;
+          }
           // refresh description + updated from GitHub, keep our icon/category/etc.
           if (r.desc) existing.desc = r.desc;
           if (r.updated) existing.updated = r.updated;
@@ -1416,16 +1474,39 @@
     }
   }
 
+  let _scanSequence = 0;
   async function rescan() {
     if (!IS_DESKTOP) return;
+    const sequence = ++_scanSequence;
+    const revisions = { ...state.operationRevision };
+    const activeAtStart = new Set(Object.keys(state.busy).filter(slug => state.busy[slug]));
     try {
       const s = await coveAPI.scan({ checkUpdates: true });
-      state.onDisk = new Set((s.installed || []).map(x => x.slug));
-      state.manifests = {};
-      state.remoteUpdates = new Set();
-      state.updated = {};
+      if (sequence !== _scanSequence) return;
+      if (!Array.isArray(s?.installed)) throw new Error(s?.error || 'invalid scan result');
+      const protectedSlugs = new Set([...activeAtStart, ...Object.keys(state.operationRevision)]
+        .filter(slug => activeAtStart.has(slug) || state.busy[slug]
+          || revisions[slug] !== state.operationRevision[slug]));
+      const onDisk = new Set(s.installed.map(row => row.slug));
+      for (const slug of protectedSlugs) {
+        if (state.onDisk.has(slug)) onDisk.add(slug);
+        else onDisk.delete(slug);
+      }
+      state.onDisk = onDisk;
+      for (const slug of Object.keys(state.installedOverride)) {
+        if (!protectedSlugs.has(slug)) delete state.installedOverride[slug];
+      }
+      for (const slug of Object.keys(state.manifests)) {
+        if (!protectedSlugs.has(slug)) delete state.manifests[slug];
+      }
+      state.remoteUpdates = new Set([...state.remoteUpdates].filter(slug => protectedSlugs.has(slug)));
+      for (const slug of Object.keys(state.updated)) {
+        if (!protectedSlugs.has(slug)) delete state.updated[slug];
+      }
+      mergeInstalledPrograms(s.installed);
       state.rateLimitedUntil = s.rateLimitedUntil || 0;
-      for (const row of s.installed || []) {
+      for (const row of s.installed) {
+        if (protectedSlugs.has(row.slug)) continue;
         if (row.manifest) state.manifests[row.slug] = row.manifest;
         if (row.hasUpdate) state.remoteUpdates.add(row.slug);
         if (row.releaseNotes) state.releaseNotes[row.slug] = row.releaseNotes;
@@ -1436,7 +1517,7 @@
           prog.latestTag = row.latestTag || '';
           prog.latestUnknown = !!row.latestUnknown;
           prog.source = row.source || '';
-          prog.version = row.version ? row.version.replace(/^v/, '') : '';
+          prog.version = scanVersion(row.version);
         }
       }
       renderRateLimitBanner();
@@ -1472,8 +1553,8 @@
       if (opts.force !== false && IS_DESKTOP) {
         try { await coveAPI.refresh(); } catch {}
       }
+      await discoverAndMerge({ force: opts.force !== false });
       await rescan();
-      await discoverAndMerge({ force: true });
       await fetchAllReleaseNotes();
       render();
     } finally {
@@ -1763,21 +1844,40 @@
       pinConfirm.textContent = 'Pin';
     }
   });
+  let _updateAllBusy = false;
   async function doUpdateAll() {
+    if (_updateAllBusy) return;
     const updates = window.PROGRAMS.filter(hasUpdate);
     if (!updates.length) return;
-    if (IS_DESKTOP) {
-      const names = updates.map(p => `${p.name}${p.latestTag ? ` → ${p.latestTag}` : ''}`);
-      const confirmed = await coveAPI.confirmUpdateAll(names);
-      if (!confirmed?.ok) return;
+    _updateAllBusy = true;
+    const button = document.getElementById('btn-update-all');
+    if (button) button.disabled = true;
+    try {
+      if (IS_DESKTOP) {
+        const names = updates.map(p => `${p.name}${p.latestTag ? ` → ${p.latestTag}` : ''}`);
+        const confirmed = await coveAPI.confirmUpdateAll(names);
+        if (!confirmed?.ok) return;
+      }
+      let succeeded = 0;
+      let failed = 0;
+      let skipped = 0;
+      for (const prog of updates) {
+        const result = await doUpdate(prog, { rescanAfter: false });
+        if (result?.ok) succeeded++;
+        else if (result?.skipped) skipped++;
+        else failed++;
+      }
+      if (IS_DESKTOP) await rescan();
+      render();
+      const detail = [failed ? `${failed} failed` : '', skipped ? `${skipped} already busy` : ''].filter(Boolean);
+      toast(`Updated ${succeeded} ${succeeded === 1 ? 'program' : 'programs'}${detail.length ? `; ${detail.join(', ')}. Retry remaining updates when ready.` : ''}`, failed ? 'error' : 'info');
+      return { succeeded, failed, skipped };
+    } catch (e) {
+      toast(`Update all failed: ${e.message}`, 'error');
+    } finally {
+      _updateAllBusy = false;
+      if (button) button.disabled = false;
     }
-    // Sequential updates keep the network calm and surface failures one at
-    // a time in toasts rather than as a pile.
-    for (const prog of updates) {
-      // eslint-disable-next-line no-await-in-loop
-      await doUpdate(prog);
-    }
-    toast(`Updated ${updates.length} ${updates.length === 1 ? 'program' : 'programs'}`);
   }
   document.getElementById('btn-update-all')?.addEventListener('click', doUpdateAll);
 
@@ -1831,7 +1931,10 @@
           window.PROGRAMS = window.PROGRAMS.filter(p =>
             !p.platforms || p.platforms.includes(plat));
         }
-        if (quickState?.installed) state.onDisk = new Set(quickState.installed);
+        if (Array.isArray(quickState?.installed)) {
+          state.onDisk = new Set(quickState.installed);
+          mergeInstalledPrograms(quickState.installed);
+        }
         if (cfg) {
           state.toolOrder = Array.isArray(cfg.toolOrder) ? cfg.toolOrder.slice() : [];
           state.bookmarks = new Set(Array.isArray(cfg.bookmarks) ? cfg.bookmarks : []);
