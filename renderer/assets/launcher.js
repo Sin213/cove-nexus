@@ -194,7 +194,7 @@
     }).join('');
   }
 
-  function buildProtocolHtml(proto) {
+  function buildProtocolContent(proto) {
     if (!proto) return '';
     const parts = [];
 
@@ -233,14 +233,24 @@
       );
     }
 
-    return parts.length ? `<div class="foxy-proto-block">${parts.join('')}</div>` : '';
+    return parts.join('');
   }
 
+  function buildProtocolHtml(content) {
+    return content ? `<div class="foxy-proto-block"><div class="foxy-proto-content" style="display:flex;flex-direction:column;gap:4px">${content}</div></div>` : '';
+  }
+
+  let _standardSessionTabId = null;
+  let _standardSessionSlug = null;
+  let _standardSessionChrome = null;
   function renderToolSession() {
     const session = document.getElementById('foxy-session');
     const mainEl = document.querySelector('main.main');
     if (!session || !mainEl) return;
     const resetEmbedded = () => {
+      _standardSessionTabId = null;
+      _standardSessionSlug = null;
+      _standardSessionChrome = null;
       mainEl.classList.remove('tab-tool', 'tab-web-active', 'tab-web-embedded');
       session.hidden = true;
       document.getElementById('tab-web-host').hidden = true;
@@ -302,6 +312,9 @@
       // Hide the launcher chrome entirely so the embedded app fills the area
       // below the foxy tab strip. Keep the session element empty so we don't
       // accidentally reveal stale chrome while toggling tabs.
+      _standardSessionTabId = null;
+      _standardSessionSlug = null;
+      _standardSessionChrome = null;
       session.innerHTML = '';
       session.hidden = true;
       mainEl.classList.add('tab-tool', 'tab-web-active', 'tab-web-embedded');
@@ -352,7 +365,7 @@
       sessionNote = `<p class="foxy-session-note">The app runs as a separate window outside Cove Nexus. Switch to it in your OS taskbar to use it.</p>`;
     }
 
-    session.innerHTML = `
+    const standardSessionChrome = `
       <div class="foxy-session-header">
         <div class="foxy-session-icon">${icon}</div>
         <div class="foxy-session-meta">
@@ -373,8 +386,23 @@
         ${notesUrl ? `<button class="btn btn-ghost" data-action="notes" data-url="${notesUrlAttr}">Release notes</button>` : ''}
       </div>
       ${sessionNote}
-      ${buildProtocolHtml(proto)}
     `;
+    const protocolContent = buildProtocolContent(proto);
+    const protocolEl = session.querySelector('.foxy-proto-content');
+    const canPatchProtocol = !session.hidden
+      && _standardSessionTabId === tab.id
+      && _standardSessionSlug === prog.slug
+      && _standardSessionChrome === standardSessionChrome
+      && (protocolEl || !protocolContent);
+    if (canPatchProtocol) {
+      if (!protocolContent) protocolEl?.closest('.foxy-proto-block')?.remove();
+      else if (protocolEl) protocolEl.innerHTML = protocolContent;
+    } else {
+      session.innerHTML = standardSessionChrome + buildProtocolHtml(protocolContent);
+    }
+    _standardSessionTabId = tab.id;
+    _standardSessionSlug = prog.slug;
+    _standardSessionChrome = standardSessionChrome;
     session.hidden = false;
     mainEl.classList.add('tab-tool');
     mainEl.classList.remove('tab-web-active', 'tab-web-embedded');
@@ -737,9 +765,6 @@
     const version = document.getElementById('ft-version');
     const date = document.getElementById('ft-date');
     const shot = document.getElementById('ft-screenshot');
-    const primaryLabel = document.getElementById('ft-primary-label');
-    const primary = document.getElementById('ft-primary');
-    if (primary) primary.disabled = !!state.busy[prog.slug];
     // Prefer the upstream tag — the featured card showcases what's shipping
     // right now, not whatever the user has installed locally.
     const displayVer = (prog.latestTag || '').replace(/^v/, '');
@@ -751,6 +776,13 @@
       if (prog.preview) { shot.src = prog.preview; shot.style.display = ''; }
       else { shot.style.display = 'none'; }
     }
+    renderFeaturedStatus(prog);
+  }
+
+  function renderFeaturedStatus(prog) {
+    const primaryLabel = document.getElementById('ft-primary-label');
+    const primary = document.getElementById('ft-primary');
+    if (primary) primary.disabled = !!state.busy[prog.slug];
     if (primaryLabel) {
       const busy = state.busy[prog.slug];
       if (busy === 'installing') primaryLabel.textContent = 'Installing…';

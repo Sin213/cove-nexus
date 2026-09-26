@@ -13,6 +13,7 @@ function element() {
   const classes = new Set();
   const node = {
     style: { setProperty() {}, removeProperty() {} }, dataset: {}, children: [], selectors: new Map(),
+    closestNodes: new Map(),
     listeners: new Map(), writes: 0, hidden: false, disabled: false, textContent: '',
     classList: {
       add: (...names) => names.forEach(name => classes.add(name)),
@@ -24,6 +25,7 @@ function element() {
     removeEventListener() {}, setAttribute(name, value) { this[name] = value; }, removeAttribute() {},
     querySelector(selector) { return this.selectors.get(selector) || null; },
     querySelectorAll() { return []; },
+    closest(selector) { return this.closestNodes.get(selector) || null; },
     appendChild(child) { this.children.push(child); },
     insertAdjacentHTML(_where, html) { this.inserted = (this.inserted || 0) + 1; this.lastInserted = html; },
     getBoundingClientRect() { return {x: 0, y: 0, width: 800, height: 600}; },
@@ -34,7 +36,33 @@ function element() {
     set(html) {
       this.html = html;
       this.writes++;
-      if (html.includes('foxy-proto-content')) this.selectors.set('.foxy-proto-content', element());
+      this.selectors.delete('.foxy-proto-block');
+      this.selectors.delete('.foxy-proto-content');
+      const divs = [];
+      for (const [tag] of html.matchAll(/<\/?div\b[^>]*>/gi)) {
+        if (tag.startsWith('</')) { divs.pop(); continue; }
+        const className = /\bclass\s*=\s*(["'])(.*?)\1/i.exec(tag)?.[2] || '';
+        const names = className.split(/\s+/);
+        const block = names.includes('foxy-proto-block') ? element() : null;
+        if (block) {
+          block.remove = () => {
+            block.removed = true;
+            if (this.selectors.get('.foxy-proto-block') !== block) return;
+            this.selectors.delete('.foxy-proto-block');
+            if (this.selectors.get('.foxy-proto-content')?.closest('.foxy-proto-block') === block) {
+              this.selectors.delete('.foxy-proto-content');
+            }
+          };
+          if (!this.selectors.has('.foxy-proto-block')) this.selectors.set('.foxy-proto-block', block);
+        }
+        if (names.includes('foxy-proto-content')) {
+          const content = element();
+          const ancestor = divs.findLast(parent => parent.block)?.block;
+          if (ancestor) content.closestNodes.set('.foxy-proto-block', ancestor);
+          if (!this.selectors.has('.foxy-proto-content')) this.selectors.set('.foxy-proto-content', content);
+        }
+        divs.push({block});
+      }
     },
   });
   Object.defineProperty(node, 'childElementCount', {get() { return this.innerHTML ? 1 : 0; }});
@@ -408,6 +436,216 @@ test('downloaded update displays from startup snapshot and restarts only on clic
   assert.equal(restarts, 0);
   await h.get('self-update-download').onclick();
   assert.equal(restarts, 1);
+});
+
+test('protocol mock preserves wrapper ancestry and detached blocks cannot remove newer nodes', () => {
+  const session = element();
+  session.innerHTML = '<div class="foxy-proto-content"></div>';
+  assert.equal(session.querySelector('.foxy-proto-content').closest('.foxy-proto-block'), null);
+  assert.equal(session.querySelector('.foxy-proto-block'), null);
+
+  session.innerHTML = '<div class="foxy-proto-block"></div><div class="foxy-proto-content"></div>';
+  assert.equal(session.querySelector('.foxy-proto-content').closest('.foxy-proto-block'), null);
+
+  session.innerHTML = '<div class="foxy-proto-block"><div class="foxy-proto-content"></div></div>';
+  const oldBlock = session.querySelector('.foxy-proto-block');
+  assert.equal(session.querySelector('.foxy-proto-content').closest('.foxy-proto-block'), oldBlock);
+  session.innerHTML = '<div class="foxy-proto-block"><div class="foxy-proto-content"></div></div>';
+  const newBlock = session.querySelector('.foxy-proto-block');
+  oldBlock.remove();
+  assert.equal(session.querySelector('.foxy-proto-block'), newBlock);
+  assert.equal(session.querySelector('.foxy-proto-content').closest('.foxy-proto-block'), newBlock);
+});
+
+test('external protocol progress leaves session controls intact', () => {
+  const h = harness();
+  const p = h.window.PROGRAMS[0];
+  h.state.foxyMode = true;
+  h.state.tabs = [{id: p.slug, slug: p.slug}];
+  h.state.activeTabId = p.slug;
+  h.state.processes[p.slug] = {status: 'running', openMode: 'external', protocol: {progress: 10}};
+  h.renderToolSession();
+  const session = h.get('foxy-session');
+  const writes = session.writes;
+  h.state.processes[p.slug].protocol.progress = 20;
+  h.renderToolSession();
+  assert.equal(session.writes, writes);
+  assert.match(session.querySelector('.foxy-proto-content').innerHTML, /20%/);
+});
+
+test('protocol appearance rewrites once before later updates patch in place', () => {
+  const h = harness();
+  const p = h.window.PROGRAMS[0];
+  h.state.foxyMode = true;
+  h.state.tabs = [{id: p.slug, slug: p.slug}];
+  h.state.activeTabId = p.slug;
+  h.state.processes[p.slug] = {status: 'running', openMode: 'external', protocol: {}};
+  h.renderToolSession();
+  const session = h.get('foxy-session');
+  const absentWrites = session.writes;
+  assert.equal(session.querySelector('.foxy-proto-content'), null);
+
+  h.state.processes[p.slug].protocol.progress = 10;
+  h.renderToolSession();
+  assert.equal(session.writes, absentWrites + 1);
+  const presentWrites = session.writes;
+  assert(session.querySelector('.foxy-proto-content'));
+
+  h.state.processes[p.slug].protocol.progress = 20;
+  h.renderToolSession();
+  assert.equal(session.writes, presentWrites);
+  assert.match(session.querySelector('.foxy-proto-content').innerHTML, /20%/);
+  assert.match(session.innerHTML, /foxy-session-actions/);
+});
+
+test('clearing protocol content removes its wrapper', () => {
+  const h = harness();
+  const p = h.window.PROGRAMS[0];
+  h.state.foxyMode = true;
+  h.state.tabs = [{id: p.slug, slug: p.slug}];
+  h.state.activeTabId = p.slug;
+  h.state.processes[p.slug] = {status: 'running', openMode: 'external', protocol: {progress: 10}};
+  h.renderToolSession();
+  const session = h.get('foxy-session');
+  assert(session.querySelector('.foxy-proto-block'));
+  h.state.processes[p.slug].protocol = {};
+  h.renderToolSession();
+  assert.equal(session.querySelector('.foxy-proto-block'), null);
+});
+
+test('switching the active tab forces a full session rewrite instead of patching the previous tab\'s protocol node', () => {
+  const h = harness();
+  const a = program('cove-a');
+  const b = program('cove-b');
+  h.window.PROGRAMS = [a, b];
+  h.state.foxyMode = true;
+  h.state.tabs = [{id: a.slug, slug: a.slug}, {id: b.slug, slug: b.slug}];
+  h.state.activeTabId = a.slug;
+  h.state.processes[a.slug] = {status: 'running', openMode: 'external', protocol: {progress: 10}};
+  h.state.processes[b.slug] = {status: 'running', openMode: 'external', protocol: {progress: 70}};
+  h.renderToolSession();
+  const session = h.get('foxy-session');
+  const aProtocol = session.querySelector('.foxy-proto-content');
+  const writes = session.writes;
+
+  h.state.activeTabId = b.slug;
+  h.renderToolSession();
+  assert.equal(session.writes, writes + 1);
+  assert.notEqual(session.querySelector('.foxy-proto-content'), aProtocol);
+  assert.equal(aProtocol.writes, 0);
+  assert.match(session.innerHTML, /cove-b/);
+  assert.match(session.innerHTML, /70%/);
+  assert.doesNotMatch(session.innerHTML, /10%/);
+});
+
+test('an inactive or hidden session does not receive a targeted protocol patch', () => {
+  const h = harness();
+  const p = h.window.PROGRAMS[0];
+  h.state.foxyMode = true;
+  h.state.tabs = [{id: p.slug, slug: p.slug}];
+  h.state.activeTabId = p.slug;
+  h.state.processes[p.slug] = {status: 'running', openMode: 'external', protocol: {progress: 10}};
+  h.renderToolSession();
+  const session = h.get('foxy-session');
+  const staleProtocol = session.querySelector('.foxy-proto-content');
+  const writes = session.writes;
+
+  session.hidden = true;
+  h.state.processes[p.slug].protocol.progress = 20;
+  h.renderToolSession();
+  assert.equal(session.writes, writes + 1);
+  assert.equal(staleProtocol.writes, 0);
+  assert.notEqual(session.querySelector('.foxy-proto-content'), staleProtocol);
+  assert.match(session.innerHTML, /20%/);
+});
+
+test('switching tabs with the same program rewrites the previous tab session', () => {
+  const h = harness();
+  const p = h.window.PROGRAMS[0];
+  h.state.foxyMode = true;
+  h.state.tabs = [{id: 'first', slug: p.slug}, {id: 'second', slug: p.slug}];
+  h.state.activeTabId = 'first';
+  h.state.processes[p.slug] = {status: 'running', openMode: 'external', protocol: {progress: 10}};
+  h.renderToolSession();
+  const session = h.get('foxy-session');
+  const oldProtocol = session.querySelector('.foxy-proto-content');
+  const writes = session.writes;
+
+  h.state.activeTabId = 'second';
+  h.state.processes[p.slug].protocol.progress = 20;
+  h.renderToolSession();
+  assert.equal(session.writes, writes + 1);
+  assert.notEqual(session.querySelector('.foxy-proto-content'), oldProtocol);
+  assert.equal(oldProtocol.writes, 0);
+  assert.match(session.innerHTML, /20%/);
+});
+
+test('changing program ownership with unchanged chrome rewrites the session', () => {
+  const h = harness();
+  // Distinct slug identities render the same text, isolating the slug guard.
+  const p = program(new String('cove-a'));
+  p.name = 'Cove A';
+  h.window.PROGRAMS = [p];
+  h.state.foxyMode = true;
+  h.state.tabs = [{id: 'same-tab', slug: p.slug}];
+  h.state.activeTabId = 'same-tab';
+  h.state.processes[p.slug] = {status: 'running', openMode: 'external', protocol: {progress: 10}};
+  h.renderToolSession();
+  const session = h.get('foxy-session');
+  const oldProtocol = session.querySelector('.foxy-proto-content');
+  const writes = session.writes;
+
+  p.slug = new String('cove-a');
+  h.state.tabs[0].slug = p.slug;
+  h.state.processes[p.slug].protocol.progress = 20;
+  h.renderToolSession();
+  assert.equal(session.writes, writes + 1);
+  assert.notEqual(session.querySelector('.foxy-proto-content'), oldProtocol);
+  assert.equal(oldProtocol.writes, 0);
+  assert.match(session.innerHTML, /20%/);
+});
+
+test('changing session chrome rewrites protocol content for the same tab and program', () => {
+  const h = harness();
+  const p = h.window.PROGRAMS[0];
+  h.state.foxyMode = true;
+  h.state.tabs = [{id: p.slug, slug: p.slug}];
+  h.state.activeTabId = p.slug;
+  h.state.processes[p.slug] = {status: 'running', openMode: 'external', protocol: {progress: 10}};
+  h.renderToolSession();
+  const session = h.get('foxy-session');
+  const oldProtocol = session.querySelector('.foxy-proto-content');
+  const writes = session.writes;
+
+  p.name = 'Renamed tool';
+  h.state.processes[p.slug].protocol.progress = 20;
+  h.renderToolSession();
+  assert.equal(session.writes, writes + 1);
+  assert.notEqual(session.querySelector('.foxy-proto-content'), oldProtocol);
+  assert.equal(oldProtocol.writes, 0);
+  assert.match(session.innerHTML, /Renamed tool/);
+  assert.match(session.innerHTML, /20%/);
+});
+
+test('missing protocol content node forces a full rewrite', () => {
+  const h = harness();
+  const p = h.window.PROGRAMS[0];
+  h.state.foxyMode = true;
+  h.state.tabs = [{id: p.slug, slug: p.slug}];
+  h.state.activeTabId = p.slug;
+  h.state.processes[p.slug] = {status: 'running', openMode: 'external', protocol: {progress: 10}};
+  h.renderToolSession();
+  const session = h.get('foxy-session');
+  h.state.processes[p.slug].protocol.progress = 20;
+  h.renderToolSession();
+  const writes = session.writes;
+  session.selectors.delete('.foxy-proto-content');
+
+  h.state.processes[p.slug].protocol.progress = 30;
+  h.renderToolSession();
+  assert.equal(session.writes, writes + 1);
+  assert.match(session.innerHTML, /30%/);
+  assert(session.querySelector('.foxy-proto-content'));
 });
 
 test('reopening the pin modal ignores an older request for the same program', async () => {
