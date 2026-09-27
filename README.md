@@ -8,6 +8,8 @@ Cove Nexus is a desktop launcher for the [Sin213](https://github.com/Sin213) fle
 
 Supported Cove tools can also open directly **inside** Nexus via **Foxy Mode**, so you don't have to juggle separate windows. Cove Meme Maker is the first tool wired up for it; the rest still launch as their own apps and behave exactly like before.
 
+Embedded Foxy Mode currently uses the Linux protocol transport. On Windows, tools launch as external apps. If an embedded page fails to load, Nexus shows the error and offers a retry when the app has reported its address.
+
 ---
 
 ## Install
@@ -49,13 +51,15 @@ Two options from the [Releases](https://github.com/Sin213/cove-nexus/releases/la
 - **Drag-to-reorder** - drag cards to arrange the grid your way; your order sticks and works in every view.
 - **Install / launch / update** — each tool is a single click, with a live progress bar showing download bytes and verification status.
 - **Per-tool release notes** — the latest version and a short changelog preview sit on every card, fetched live from GitHub.
-- **Optional SHA-256 verification** — when a release ships a `<asset>.sha256` companion, Cove Nexus downloads and verifies before replacing the old binary. Missing → skipped.
+- **Update all** - one button updates every outdated tool and reports exactly which updates succeeded and which failed.
+- **Works offline** - installed tools stay listed and launchable when GitHub is unreachable.
+- **SHA-256 verification** - when a release ships a `<asset>.sha256` sidecar (or an older `checksums-sha256.txt` bundle), Cove Nexus verifies the download before replacing the old binary. A mismatch or failed check aborts the install; releases without checksums skip verification.
 - **Tray icon + minimize-to-tray** — close the window and Nexus keeps running in the tray with a "Check for updates" option. Start-minimized and launch-on-startup are one-click toggles in Settings.
 - **Bring-your-own folder** — point Cove Nexus at a folder you already use (e.g., `~/Applications/`), and it auto-detects any Cove AppImage or `.exe` already living there.
 - **Adopted vs. managed** — files Cove Nexus downloads are "managed" (replaced on update). Files it merely adopted from your folder are "adopted" (left alone on update; you clean up old versions on your own schedule).
-- **Silent self-updates** — the launcher itself updates in the background from GitHub releases and relaunches seamlessly (Setup.exe + AppImage). Portable users get a one-click in-app banner.
+- **Background self-updates** — installed Windows builds restart automatically when no hosted session is active. Active sessions get a restart action. AppImages are replaced in place and take effect on the next launch; portable users get a download banner.
 - **Pin + unpin versions** — choose a specific tag for any tool and stay on it until you unpin; updates won't override your choice.
-- **GitHub rate-limit aware** — transparent 5-minute cache, `X-RateLimit-*` backoff, optional PAT in Settings bumps the limit from 60/hr to 5000/hr.
+- **GitHub rate-limit aware** - transparent 5-minute cache, `X-RateLimit-*` backoff, cached data reused for up to 7 days when GitHub is down or rate-limited, and an optional PAT in Settings bumps the limit from 60/hr to 5000/hr.
 - **Themeable** — light + dark themes, seven accent colors, three densities, two chrome modes (`Ctrl+,` for the Tweaks panel).
 - **UI zoom** - `Ctrl/Cmd +` / `-` / `0` scales the whole interface up, down, or back to default.
 - **Cross-platform** — Linux AppImage, Windows NSIS installer, Windows portable `.exe`.
@@ -66,15 +70,21 @@ Two options from the [Releases](https://github.com/Sin213/cove-nexus/releases/la
 
 ### Auto-discovery
 
-On launch, Cove Nexus calls `GET /users/Sin213/repos` and filters to repos named `cove-*`. Anything not already in the static registry is added to the grid on the fly. The grid refreshes on startup, on the titlebar refresh button, every 10 minutes while the window is open, and when the window regains focus after > 30s idle.
+On launch, Cove Nexus calls `GET /users/Sin213/repos` and filters to repos named `cove-*`. Anything not already in the static registry is added to the grid on the fly. Installed tools are populated from the local registry even when GitHub is unavailable. The grid refreshes on startup, on the titlebar refresh button, every 30 minutes, and when the window regains focus after more than 10 minutes away.
+
+GitHub requests share a bounded queue and reuse requests already in flight. Successful unauthenticated API responses are cached on disk for offline use; authenticated responses stay in memory. A forced refresh bypasses cached responses.
 
 ### Install / update
 
 Clicking **Install** on a card fetches `GET /repos/Sin213/<slug>/releases/latest`, picks the platform-appropriate asset (Portable.exe on Windows, AppImage on Linux), downloads it into your programs folder, and records the tag in `installs.json`. Update repeats the same flow if the tag has moved.
 
+Each install downloads over HTTPS into its own temporary folder, with size limits and cleanup on failure. The file is verified and marked executable before it replaces the old binary, so a failed install leaves the working version in place.
+
 ### Adoption
 
-On every scan, Cove Nexus walks your programs folder. Any file matching a Cove release-asset pattern (`cove-<name>-<version>-Portable.exe`, `Cove-<Name>-<version>-x86_64.AppImage`, etc.) that isn't already tracked gets registered as **adopted** — version parsed from the filename, no download needed. Point the folder at your existing `~/Applications/` and every Cove tool you've already downloaded shows up as installed.
+On every scan, Cove Nexus walks your programs folder. Recognized AppImages on Linux and portable executables on Windows that aren't already tracked get registered as **adopted** — version parsed from the filename, no download needed. Scans ignore installers and other platforms' binaries, preserve live pinned versions, and never delete files based on their names. After a verified update, Nexus can remove the previous binary it managed.
+
+Removing or forgetting a tool stops the next scan from adopting it again from the same folder. Installing it again or picking its file by hand clears that.
 
 ### Launching
 
@@ -86,15 +96,17 @@ Some Cove tools expose an embedded web UI that Nexus can host directly. When a t
 
 While a Foxy Mode app is open, its card shows **Running**. Clicking **Running** snaps focus back to the existing tab — Nexus never opens a duplicate. Closing the tab returns the card to its normal **Launch** state.
 
+If a hosted page fails, crashes, or does not finish loading within 15 seconds, the tab shows the error and offers a retry. Exports and downloads from a Foxy tab are saved to your Downloads folder; an existing file is never overwritten (a `(1)` suffix is added instead), and a toast names the saved file.
+
 Foxy Mode is opt-in per tool: tools that don't advertise it still install, launch, and update as standalone apps. Nexus continues to manage every binary in your configured programs folder either way.
 
-**For developers:** Foxy-capable tools advertise a small embedded web endpoint that Nexus loads inside an isolated, sandboxed view. Standalone launches are unaffected.
+**For developers:** Foxy-capable tools advertise a small embedded web endpoint that Nexus loads inside an isolated, sandboxed view. Each tool gets its own session: permissions are denied by default (clipboard writes are the one exception), navigation stays on the tool's own origin, and popups are blocked. Standalone launches are unaffected.
 
 ### Silent self-update
 
-Cove Nexus uses [`electron-updater`](https://www.electron.build/auto-update) to check `github.com/Sin213/cove-nexus/releases/latest` on launch and hourly while running. When a newer release is found it downloads in the background and relaunches silently when ready. No prompt.
+Cove Nexus uses [`electron-updater`](https://www.electron.build/auto-update) to check `github.com/Sin213/cove-nexus/releases/latest` on launch and hourly while running. New releases download in the background. Windows restarts automatically while idle; if a hosted session is active, Nexus waits for the user to choose **Restart and update**. Linux replaces the AppImage in place and offers the same restart action without closing active work automatically.
 
-The Windows **Portable** build is the one exception — `electron-updater` can't hot-swap a running `.exe` that the user dropped somewhere themselves, so portable users get a dismissable in-app banner instead. Setup.exe and AppImage continue to update silently.
+The Windows **Portable** build is the one exception — `electron-updater` can't hot-swap a running `.exe` that the user dropped somewhere themselves, so portable users get a dismissable in-app banner instead. Setup.exe and AppImage builds update in the background as described above.
 
 ---
 
@@ -119,13 +131,14 @@ The static registry includes these ten tools by default. Any other `cove-*` repo
 
 ## Building from source
 
-Requirements: Node 18+.
+Requirements: Node 22 (the version CI builds with).
 
 ```bash
 git clone https://github.com/Sin213/cove-nexus.git
 cd cove-nexus
 npm install
 npm start                # dev run
+npm run check            # lint and run the Node test suite
 npm run dist:linux       # build AppImage + .deb → release/
 npm run dist:win         # build Windows NSIS Setup.exe + Portable.exe → release/ (needs Wine on Linux)
 npm run release          # build Linux + Windows, publish to GitHub, upload sha256 sidecars (needs GH_TOKEN)
@@ -133,11 +146,23 @@ npm run release          # build Linux + Windows, publish to GitHub, upload sha2
 
 Every shipped binary (AppImage, .deb, Setup.exe, Portable.exe) gets a matching `<asset>.sha256` sidecar in `release/`, written by `build/afterAllArtifactBuild.js`. The `release` script additionally runs `build/postReleaseSidecars.js` to generate and upload sidecars for the auto-update metadata files (`latest*.yml`).
 
+Pull requests and branch pushes run lint and tests on Linux and Windows. Tag releases must pass the same checks before either platform builds. The finalizer requires all four platform artifacts, `latest.yml`, `latest-linux.yml`, and a checksum sidecar for every asset; missing, empty, or unfinished assets fail the release. CI sets the release notes and leaves the release as a draft to publish by hand.
+
 ### Project layout
 
 ```
 main.js                             Electron main process, IPC handlers, auto-updater
 preload.js                          contextBridge exposing coveAPI to the renderer
+lib/
+  network.js                        HTTPS requests, GitHub request queue + cache, downloads
+  reconcile.js                      Programs-folder scan and adoption
+  install-workspace.js              Per-install temp folder + checksum handling
+  hosted-view.js                    Foxy Mode view isolation, navigation, permissions
+  tabweb.js                         Foxy Mode tab lifecycle rules
+  downloads.js                      Save paths for Foxy tab downloads
+  open-mode.js                      Embedded vs external launch choice
+  processes.js                      Child process diagnostics
+  self-update.js                    Self-update restart policy
 renderer/
   index.html                        App shell + settings modal
   assets/
@@ -147,6 +172,11 @@ renderer/
     cove-video-editor-preview.png   Featured-banner screenshot
 build/
   icon.png                          Packaging icon (512×512)
+  afterAllArtifactBuild.js          Writes a .sha256 sidecar per build artifact
+  postReleaseSidecars.js            Uploads latest*.yml sidecars and finalizes the release
+  releaseValidation.js              Required release asset checks
+test/                               Node test suite (npm test)
+.github/workflows/                  checks.yml (lint + tests), release.yml (tag builds)
 ```
 
 ### Keyboard shortcuts
