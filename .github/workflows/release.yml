@@ -3,14 +3,15 @@ name: Release
 # Tag-driven release. Push a tag of the form `v*` (e.g. v2.0.7) and this
 # workflow builds the AppImage + .deb on Linux, the NSIS Setup.exe + Portable.exe
 # on Windows, publishes one `<artifact>.sha256` sidecar per shipping artifact
-# plus sidecars for the auto-update metadata, and publishes the GitHub Release.
+# plus sidecars for the auto-update metadata, and leaves the GitHub Release as
+# a draft to be published by hand.
 #
 # The release is created as a draft by both build jobs (electron-publish's
 # default for the GitHub provider). Each build job uploads its artifacts'
 # .sha256 sidecars via afterAllArtifactBuild.js. The finalize job runs
 # after both builds: it downloads latest*.yml metadata from the draft,
 # sets release notes, uploads their .sha256 sidecars, validates the complete
-# platform artifact/checksum set, and promotes the draft.
+# platform artifact/checksum set, and keeps the draft (COVE_KEEP_DRAFT=1).
 
 on:
   push:
@@ -108,7 +109,7 @@ jobs:
         run: npx electron-builder --win --publish=always
 
   finalize:
-    name: Finalize sidecars + publish draft
+    name: Finalize sidecars (keep draft)
     needs: [build-linux, build-windows]
     runs-on: ubuntu-latest
     steps:
@@ -182,7 +183,8 @@ jobs:
             --title "$NAME" \
             --notes-file "$NOTES_FILE"
 
-      - name: Finalize sidecars + promote draft
+      - name: Finalize sidecars (keep draft)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COVE_KEEP_DRAFT: '1'
         run: node build/postReleaseSidecars.js
