@@ -9,7 +9,8 @@ name: Release
 # default for the GitHub provider). Each build job uploads its artifacts'
 # .sha256 sidecars via afterAllArtifactBuild.js. The finalize job runs
 # after both builds: it downloads latest*.yml metadata from the draft,
-# uploads their .sha256 sidecars, and promotes the draft.
+# sets release notes, uploads their .sha256 sidecars, validates the complete
+# platform artifact/checksum set, and promotes the draft.
 
 on:
   push:
@@ -25,9 +26,19 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+    with:
+      ref: ${{ inputs.tag || github.ref }}
+
   build-linux:
     name: Build Linux (AppImage + deb)
+    needs: checks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -38,13 +49,14 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Verify tag matches package.json version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          TAG="${{ inputs.tag || github.ref_name }}"
           PKG="$(node -p "require('./package.json').version")"
           if [ "${TAG#v}" != "$PKG" ]; then
             echo "Tag $TAG does not match package.json version $PKG - refusing to build." >&2
@@ -61,6 +73,7 @@ jobs:
 
   build-windows:
     name: Build Windows (Setup.exe + Portable.exe)
+    needs: checks
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -71,14 +84,15 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Verify tag matches package.json version
         shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          TAG="${{ inputs.tag || github.ref_name }}"
           PKG="$(node -p "require('./package.json').version")"
           if [ "${TAG#v}" != "$PKG" ]; then
             echo "Tag $TAG does not match package.json version $PKG - refusing to build." >&2
@@ -106,17 +120,17 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       # Download latest*.yml so postReleaseSidecars.js can hash them and
       # upload their .sha256 sidecars before publishing.
       - name: Download auto-update metadata from draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           mkdir -p release
-          TAG="${{ inputs.tag || github.ref_name }}"
           echo "Downloading latest*.yml from draft release $TAG"
           # `gh release download --pattern` matches against asset names. The
           # draft is the only release at this tag at this point.
@@ -127,42 +141,48 @@ jobs:
             --skip-existing
           ls -la release
 
-      - name: Finalize sidecars + promote draft
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node build/postReleaseSidecars.js
-
-      # postReleaseSidecars.js publishes the draft but doesn't set the
-      # release body. Do it in CI. The annotated tag message is the
+      # Set notes while the release is still a draft. The annotated tag is the
       # canonical source of the release notes (no notes file committed to
       # the repo). If the tag is lightweight or has an empty message, fall
       # back to GitHub's auto-generated notes so every release still ships
       # a changelog. Also normalise the release name to match prior
       # releases ("2.0.7", not "v2.0.7").
       - name: Set release body + name
-        if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          TAG="${{ inputs.tag || github.ref_name }}"
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "Release $TAG is already public; refusing to modify it." >&2
+            exit 1
+          fi
           NAME="${TAG#v}"
+          NOTES_FILE="$(mktemp)"
+          trap 'rm -f "$NOTES_FILE"' EXIT
           # actions/checkout dereferences tags; refetch so the annotation
           # is available locally.
           git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
           NOTES="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents)')"
           if [ "$(git cat-file -t "refs/tags/${TAG}")" = "tag" ] && [ -n "$NOTES" ]; then
             echo "Setting body from annotation of tag $TAG"
-            gh release edit "$TAG" \
-              --repo "${{ github.repository }}" \
-              --title "$NAME" \
-              --notes "$NOTES"
+            printf '%s\n' "$NOTES" > "$NOTES_FILE"
           else
             echo "No tag annotation - using auto-generated notes"
-            BODY="$(gh api "repos/${{ github.repository }}/releases/generate-notes" \
-              -f tag_name="$TAG" --jq .body)"
-            gh release edit "$TAG" \
-              --repo "${{ github.repository }}" \
-              --title "$NAME" \
-              --notes "$BODY"
+            gh api "repos/${{ github.repository }}/releases/generate-notes" \
+              -f tag_name="$TAG" --jq .body > "$NOTES_FILE"
           fi
+          test -s "$NOTES_FILE"
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "Release $TAG is already public; refusing to modify it." >&2
+            exit 1
+          fi
+          gh release edit "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "$NAME" \
+            --notes-file "$NOTES_FILE"
+
+      - name: Finalize sidecars + promote draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node build/postReleaseSidecars.js

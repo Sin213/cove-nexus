@@ -17,7 +17,7 @@
     "dist": "electron-builder",
     "dist:linux": "electron-builder --linux",
     "dist:win": "electron-builder --win",
-    "release": "electron-builder --linux --win --publish=always && node build/postReleaseSidecars.js"
+    "release": "npm run check && electron-builder --linux --win --publish=always && node build/postReleaseSidecars.js"
   },
   "dependencies": {
     "electron-updater": "^6.3.9"

@@ -25,6 +25,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const https = require('node:https');
 const http = require('node:http');
+const { expectedReleaseAssets, validateReleaseAssets } = require('./releaseValidation');
 
 const REPO_ROOT = path.join(__dirname, '..');
 const RELEASE_DIR = path.join(REPO_ROOT, 'release');
@@ -231,6 +232,14 @@ async function replaceAsset({ release, owner, repo, token, assetName, data }) {
     process.exit(1);
   }
 
+  if (!dryRun) {
+    const missingMetadata = expectedReleaseAssets(PKG)
+      .filter(name => /^latest.*\.yml$/i.test(name) && !ymlFiles.includes(name));
+    if (missingMetadata.length) {
+      throw new Error(`Missing local update metadata: ${missingMetadata.join(', ')}`);
+    }
+  }
+
   // Hash each latest*.yml and write a local sidecar.
   const sidecars = [];
   for (const name of ymlFiles) {
@@ -238,7 +247,8 @@ async function replaceAsset({ release, owner, repo, token, assetName, data }) {
     const sidecarName = `${name}.sha256`;
     const sidecarPath = path.join(dir, sidecarName);
     fs.writeFileSync(sidecarPath, `${hex}  ${name}\n`, 'utf8');
-    sidecars.push({ name: sidecarName, path: sidecarPath, data: Buffer.from(`${hex}  ${name}\n`, 'utf8') });
+    sidecars.push({ name: sidecarName, path: sidecarPath, metadataName: name, hash: hex,
+      data: Buffer.from(`${hex}  ${name}\n`, 'utf8') });
     console.log(`  . ${sidecarName}`);
   }
 
@@ -269,13 +279,9 @@ async function replaceAsset({ release, owner, repo, token, assetName, data }) {
     process.exit(1);
   }
 
-  if (!release.draft) {
-    console.error(
-      `[post-release] release ${tag} is already published (draft=false). ` +
-      'Refusing to modify a public release.'
-    );
-    process.exit(1);
-  }
+  // Both builds must already have uploaded every binary and its checksum.
+  // Only metadata checksums may be absent before this script uploads them.
+  validateReleaseAssets(release, PKG, { metadataSidecarsPending: true });
 
   // Upload each yml sidecar.
   for (const sidecar of sidecars) {
@@ -289,14 +295,39 @@ async function replaceAsset({ release, owner, repo, token, assetName, data }) {
     }
   }
 
-  // Verify latest*.yml are on the draft before publishing.
+  // Re-read the draft after uploads so a missing platform, unfinished upload,
+  // missing checksum, or concurrently published release cannot pass the gate.
   const refreshedRelease = await findReleaseByTag({ owner, repo, tag, token });
-  const draftYmlCount = (refreshedRelease.assets || []).filter(a =>
-    YML_PATTERNS.some(re => re.test(a.name))
-  ).length;
-  if (draftYmlCount === 0) {
-    console.error('[post-release] no latest*.yml on draft. Refusing to publish.');
-    process.exit(1);
+  validateReleaseAssets(refreshedRelease, PKG);
+  if (refreshedRelease.id !== release.id) throw new Error('Release changed during finalization.');
+  for (const sidecar of sidecars) {
+    const asset = refreshedRelease.assets.find(a => a.name === sidecar.metadataName);
+    if (!Number.isSafeInteger(asset.id) || asset.id <= 0) {
+      throw new Error(`Invalid release asset ID for ${sidecar.metadataName}`);
+    }
+    const content = await httpRequest({
+      method: 'GET',
+      url: `${API_BASE}/repos/${owner}/${repo}/releases/assets/${asset.id}`,
+      headers: { ...authHeaders(token), Accept: 'application/octet-stream' },
+      expectedStatuses: [200],
+    });
+    if (!Buffer.isBuffer(content) ||
+        crypto.createHash('sha256').update(content).digest('hex') !== sidecar.hash) {
+      throw new Error(`Release metadata checksum mismatch: ${sidecar.metadataName}`);
+    }
+    const sidecarAsset = refreshedRelease.assets.find(a => a.name === sidecar.name);
+    if (!Number.isSafeInteger(sidecarAsset.id) || sidecarAsset.id <= 0) {
+      throw new Error(`Invalid release asset ID for ${sidecar.name}`);
+    }
+    const sidecarContent = await httpRequest({
+      method: 'GET',
+      url: `${API_BASE}/repos/${owner}/${repo}/releases/assets/${sidecarAsset.id}`,
+      headers: { ...authHeaders(token), Accept: 'application/octet-stream' },
+      expectedStatuses: [200],
+    });
+    if (!Buffer.isBuffer(sidecarContent) || !sidecarContent.equals(sidecar.data)) {
+      throw new Error(`Release checksum sidecar was modified after upload: ${sidecar.name}`);
+    }
   }
 
   if (keepDraft) {
