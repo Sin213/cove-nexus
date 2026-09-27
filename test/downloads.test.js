@@ -68,7 +68,7 @@ test('uniqueDownloadPath handles dotfiles without inventing an extension', () =>
 test('uniqueDownloadPath sanitizes traversal before joining', () => {
   const p = uniqueDownloadPath(DIR, '../../evil.png', existsFrom([]));
   assert.strictEqual(p, path.join(DIR, 'evil.png'));
-  assert.ok(p.startsWith(DIR + path.sep));
+  assert.ok(p.startsWith(path.join(DIR) + path.sep));
 });
 
 // Regression: two downloads of the same name that start before either file

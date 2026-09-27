@@ -21,7 +21,7 @@ function harness({ aliases = {}, platform = 'linux' } = {}) {
       // Simulates realpath: explicit aliases resolve to their target (like a
       // symlinked directory); anything else normalizes the same way
       // path.resolve() would for an existing plain path.
-      realpathSync: p => (aliases[p] || path.resolve(p)),
+      realpathSync: p => path.resolve(aliases[p] || p),
     },
     path, process: { platform }, unblockExe: () => {}, exists: () => true,
     listArtifactsFromNames: (names, join) => listArtifactsFromNames(names, join, 'linux'),
@@ -55,7 +55,7 @@ test('forget in one programs folder does not suppress adoption in another', () =
   context.forgetInstall(slug);
   folder('/other-programs');
   context.reconcilePrograms();
-  assert.equal(registry()[slug].path, `/other-programs/${filename}`);
+  assert.equal(registry()[slug].path, path.join('/other-programs', filename));
 });
 
 test('forget suppression survives an equivalent (unnormalized) spelling of the same programs folder', () => {

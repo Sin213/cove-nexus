@@ -6,7 +6,8 @@ const vm = require('node:vm');
 
 // Run the shipped renderer with a small DOM/IPC boundary. Test-only exports
 // replace automatic startup in memory; production code needs no test hooks.
-const source = fs.readFileSync(path.join(__dirname, '../renderer/assets/launcher.js'), 'utf8');
+// Windows checkouts may use CRLF; the startup-hook marker below expects LF.
+const source = fs.readFileSync(path.join(__dirname, '../renderer/assets/launcher.js'), 'utf8').replace(/\r\n/g, '\n');
 const programsSource = fs.readFileSync(path.join(__dirname, '../renderer/assets/programs.js'), 'utf8');
 
 function element() {
