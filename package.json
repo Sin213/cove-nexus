@@ -1,7 +1,7 @@
 {
   "name": "cove-nexus",
   "version": "2.6.0",
-  "description": "The Cove Nexus — install, launch, and update every Cove tool from a single window.",
+  "description": "The Cove Nexus \u2014 install, launch, and update every Cove tool from a single window.",
   "main": "main.js",
   "author": {
     "name": "Sin",
@@ -23,7 +23,22 @@
     "electron-updater": "^6.3.9"
   },
   "overrides": {
-    "js-yaml": "^4.3.0"
+    "js-yaml": "^4.3.0",
+    "app-builder-lib": {
+      "builder-util-runtime": "9.7.0"
+    },
+    "builder-util": {
+      "builder-util-runtime": "9.7.0"
+    },
+    "electron-builder": {
+      "builder-util-runtime": "9.7.0"
+    },
+    "electron-publish": {
+      "builder-util-runtime": "9.7.0"
+    },
+    "electron-updater": {
+      "builder-util-runtime": "9.7.0"
+    }
   },
   "devDependencies": {
     "electron": "^43.1.1",
