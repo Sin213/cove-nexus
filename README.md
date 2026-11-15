@@ -47,14 +47,17 @@ Two options from the [Releases](https://github.com/Sin213/cove-nexus/releases/la
 - **Foxy Mode** — supported tools open as a tab inside Nexus instead of a separate window. The card swaps **Launch** for **Running** while it's open; clicking **Running** focuses the existing tab instead of spawning a duplicate. Cove Meme Maker is the first tool to ship with Foxy Mode; everything else launches standalone as usual.
 - **Auto-discovery from GitHub** — any `cove-*` repo on the account shows up automatically (`cove-*-bot` repos are filtered out).
 - **Views + categories** - filter the grid by All / Installed / Updates / Not Installed, or by category tab (Media, Documents, Utilities, Create).
+- **Program search** — search names, slugs, and descriptions within the current view or category. Press Escape to clear; bookmarks and drag order still work with search active.
 - **Bookmarks** - star any tool and it joins a dedicated Bookmarks view for one-click access to your favorites.
 - **Drag-to-reorder** - drag cards to arrange the grid your way; your order sticks and works in every view.
 - **Install / launch / update** — each tool is a single click, with a live progress bar showing download bytes and verification status.
+- **Repair / reinstall** — the card menu can download a managed tool's currently installed release again after confirmation. Close the tool first; its version, pin, and settings are preserved. Adopted files cannot be repaired, and failed downloads or checksum checks leave the existing binary intact.
 - **Per-tool release notes** — the latest version and a short changelog preview sit on every card, fetched live from GitHub.
 - **Update all** - one button updates every outdated tool and reports exactly which updates succeeded and which failed.
 - **Works offline** - installed tools stay listed and launchable when GitHub is unreachable.
 - **SHA-256 verification** - when a release ships a `<asset>.sha256` sidecar (or an older `checksums-sha256.txt` bundle), Cove Nexus verifies the download before replacing the old binary. A mismatch or failed check aborts the install; releases without checksums skip verification.
 - **Tray icon + minimize-to-tray** — close the window and Nexus keeps running in the tray with a "Check for updates" option. Start-minimized and launch-on-startup are one-click toggles in Settings.
+- **Optional update notifications** — off by default in Settings. Existing update scans can send one combined native notification while Nexus is in the background, once per program release tag across restarts. Click it to show Nexus.
 - **Bring-your-own folder** — point Cove Nexus at a folder you already use (e.g., `~/Applications/`), and it auto-detects any Cove AppImage or `.exe` already living there.
 - **Adopted vs. managed** — files Cove Nexus downloads are "managed" (replaced on update). Files it merely adopted from your folder are "adopted" (left alone on update; you clean up old versions on your own schedule).
 - **Background self-updates** — installed Windows builds restart automatically when no hosted session is active. Active sessions get a restart action. AppImages are replaced in place and take effect on the next launch; portable users get a download banner.

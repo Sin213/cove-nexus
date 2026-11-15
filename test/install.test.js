@@ -22,9 +22,12 @@ async function harness(t, { download, filesystem = fs, initial = {} } = {}) {
   const releases = {};
   const content = {};
   const registered = [];
+  const resolutions = [];
+  const repairsInFlight = new Set();
   const context = {
     process, path, fs: filesystem, fsp, withInstallWorkspace, checksumForAsset, installAssetPath, matchAsset,
-    resolveRelease: async slug => releases[slug],
+    repairsInFlight,
+    resolveRelease: async (slug, options) => { resolutions.push({slug, ...options}); return releases[slug]; },
     sendProgress() {},
     pickAsset: assets => assets[0],
     reconcilePrograms() {},
@@ -34,7 +37,7 @@ async function harness(t, { download, filesystem = fs, initial = {} } = {}) {
     downloadToFile: (url, dest) => download ? download(url, dest, content) : fsp.writeFile(dest, content[url]),
     sha256File: async file => hash(await fsp.readFile(file)),
     unblockExe() {},
-    registerInstall(slug, entry) { registry[slug] = entry; registered.push(slug); },
+    registerInstall(slug, entry) { registry[slug] = {...registry[slug], ...entry}; registered.push(slug); },
   };
   const install = vm.runInNewContext(`${installSource}\ninstallOrUpdateInner`, context);
   function release(slug, { checksum = true, name = `${slug}-2.0.0-x86_64.AppImage` } = {}) {
@@ -47,8 +50,69 @@ async function harness(t, { download, filesystem = fs, initial = {} } = {}) {
     ] };
     return name;
   }
-  return { root, registry, registered, install, release, content };
+  const handlers = new Map();
+  Object.assign(context, {
+    ipcMain: {handle: (key, fn) => handlers.set(key, fn)},
+    isValidSlug: value => /^cove-[a-z-]+$/.test(value), isValidTag: value => /^v\d/.test(value),
+    processRegistry: new Map(), mainWindow: null,
+    dialog: {showMessageBox: async () => ({response: 1})}, installOrUpdate: install,
+  });
+  const repairStart = mainSource.indexOf("ipcMain.handle('cove:repair',");
+  assert(repairStart >= 0);
+  vm.runInNewContext(mainSource.slice(repairStart, mainSource.indexOf('\n});', repairStart) + 4), context);
+  return { root, registry, registered, install, release, content, releases, resolutions, repairsInFlight,
+    repair: slug => handlers.get('cove:repair')(null, slug) };
 }
+
+test('repair replaces the same installed release, preserving pin, registry settings and app settings bytes', async t => {
+  const h = await harness(t);
+  const slug = 'cove-editor';
+  const name = h.release(slug);
+  const prior = path.join(h.root, name);
+  const settings = path.join(h.root, 'editor-settings.json');
+  await fsp.writeFile(prior, 'damaged binary');
+  await fsp.writeFile(settings, '{"theme":"light","workspace":"keep"}\n');
+  h.registry[slug] = {tag: 'v2.0.0', path: prior, source: 'managed', pinnedTag: 'v1.0.0', customSetting: 'keep'};
+  const before = structuredClone(h.registry[slug]);
+  assert.equal((await h.repair(slug)).ok, true);
+  assert.deepEqual(h.resolutions, [{slug, tag: 'v2.0.0'}]);
+  assert.deepEqual(h.registry[slug], before);
+  assert.equal(await fsp.readFile(prior, 'utf8'), 'binary for cove-editor');
+  assert.equal(await fsp.readFile(settings, 'utf8'), '{"theme":"light","workspace":"keep"}\n');
+});
+
+test('repair download and checksum failures leave original binary and registry intact', async t => {
+  for (const failure of ['download', 'checksum-download', 'checksum-mismatch']) {
+    const h = await harness(t, {download: async (url, dest, content) => {
+      if (failure === 'download' || (url.startsWith('sha:') && failure === 'checksum-download')) throw new Error('download failed');
+      await fsp.writeFile(dest, url.startsWith('sha:') && failure === 'checksum-mismatch' ? '0'.repeat(64) : content[url]);
+    }});
+    const slug = 'cove-editor';
+    const name = h.release(slug);
+    const prior = path.join(h.root, name);
+    await fsp.writeFile(prior, 'working original');
+    h.registry[slug] = {tag: 'v2.0.0', path: prior, source: 'managed', pinnedTag: 'v1.0.0'};
+    const before = structuredClone(h.registry[slug]);
+    assert.equal((await h.repair(slug)).ok, false);
+    assert.equal(await fsp.readFile(prior, 'utf8'), 'working original');
+    assert.deepEqual(h.registry[slug], before);
+    assert.deepEqual(await fsp.readdir(h.root), [name]);
+    assert.equal(h.registered.length, 0);
+  }
+});
+
+test('repair refuses replacement if an install becomes adopted during the download', async t => {
+  const h = await harness(t, {download: async (url, dest, content) => {
+    await fsp.writeFile(dest, content[url]);
+    h.registry['cove-editor'].source = 'adopted';
+  }});
+  const name = h.release('cove-editor');
+  const prior = path.join(h.root, name);
+  await fsp.writeFile(prior, 'adopted bytes');
+  h.registry['cove-editor'] = {tag: 'v2.0.0', path: prior, source: 'managed'};
+  assert.equal((await h.repair('cove-editor')).ok, false);
+  assert.equal(await fsp.readFile(prior, 'utf8'), 'adopted bytes');
+});
 
 test('actual concurrent installs verify separate legacy bundles and leave no temporary directories', async (t) => {
   const ready = [];

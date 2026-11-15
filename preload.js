@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('coveAPI', {
   scan:           (opts) => ipcRenderer.invoke('cove:scan', opts || {}),
   install:        (slug) => ipcRenderer.invoke('cove:install', slug),
   update:         (slug) => ipcRenderer.invoke('cove:update', slug),
+  repair:         (slug) => ipcRenderer.invoke('cove:repair', slug),
   launch:         (slug, openMode) => ipcRenderer.invoke('cove:launch', slug, openMode),
   closeTabWeb:    (slug) => ipcRenderer.invoke('cove:tab-web:close', slug),
   recoverTabWeb:  (slug) => ipcRenderer.invoke('cove:tab-web:recover', slug),

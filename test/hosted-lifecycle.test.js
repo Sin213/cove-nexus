@@ -81,7 +81,7 @@ function hostedViewHarness() {
     }
   }
   const context = {
-    processRegistry, hostedViews, childViews, tabReadyTimers, buildHostedView,
+    processRegistry, hostedViews, childViews, tabReadyTimers, buildHostedView, repairsInFlight: new Set(),
     WebContentsView: FakeView, wireHostedDownloads() {},
     broadcastProcessUpdate() {}, mainWindow: null,
     ipcMain: {handle: (name, fn) => handlers.set(name, fn)},
@@ -123,7 +123,7 @@ function freshLaunchHarness({platform = 'linux', socketPath = null} = {}) {
   child.stderr = null;
   child.unref = () => {};
   const context = {
-    processRegistry, hostedViews, tabReadyTimers,
+    processRegistry, hostedViews, tabReadyTimers, repairsInFlight: new Set(),
     ipcMain: {handle: (name, fn) => handlers.set(name, fn)},
     isValidSlug: value => value === slug, isLegacyClone: () => false,
     app: {isPackaged: true}, crypto: {randomUUID: () => 'new-run'},
@@ -187,7 +187,7 @@ function setup({hasUrl}) {
   const view = () => ({webContents: {isDestroyed: () => false, close() {}}, setBounds() {}});
   if (hasUrl) hostedViews.set(slug, view());
   const main = {
-    processRegistry, hostedViews, childViews, tabReadyTimers,
+    processRegistry, hostedViews, childViews, tabReadyTimers, repairsInFlight: new Set(),
     canResumeHostedView, tabReadyDecision, isValidTabUrl,
     isValidSlug: value => value === slug, isLegacyClone: () => false,
     app: {isPackaged: true}, clearTimeout() {},

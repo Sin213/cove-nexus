@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, shell, dialog, Tray, Menu, nativeImage, safeStorage } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, shell, dialog, Tray, Menu, nativeImage, safeStorage, Notification } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -21,6 +21,7 @@ const { buildHostedView } = require('./lib/hosted-view');
 const { createSelfUpdateController, hasActiveHostedSession } = require('./lib/self-update');
 
 const APP_ID = 'cove-nexus';
+const APP_USER_MODEL_ID = 'com.sin.cove-nexus';
 const GITHUB_OWNER = 'Sin213';
 const GITHUB_REPO = 'cove-nexus';
 const UA = 'cove-nexus-launcher';
@@ -34,6 +35,9 @@ const EXCLUDED_REPOS = new Set([]);
 // display name ("Cove Nexus"), which Electron would otherwise turn into
 // "~/.config/Cove Nexus/" with a space and capitals.
 app.setName('Cove Nexus');
+if (process.platform === 'win32') {
+  try { app.setAppUserModelId(APP_USER_MODEL_ID); } catch {}
+}
 const _isPortable = setupPortableMode();
 if (!_isPortable) app.setPath('userData', path.join(app.getPath('appData'), APP_ID));
 
@@ -532,6 +536,7 @@ function readConfig() {
       minimizeToTray: true,
       startMinimized: false,
       launchOnStartup: false,
+      updateNotifications: false,
     };
     writeConfig({ ...raw, githubToken: '' });
     return { ...raw, githubToken: '' };
@@ -567,6 +572,9 @@ function readConfig() {
     startMinimized: !!raw?.startMinimized,
     launchOnStartup: !!raw?.launchOnStartup,
     closeAfterLaunch: !!raw?.closeAfterLaunch,
+    updateNotifications: raw?.updateNotifications === true,
+    notifiedUpdateTags: Array.isArray(raw?.notifiedUpdateTags)
+      ? raw.notifiedUpdateTags.filter(key => typeof key === 'string') : [],
     foxyMode: !!raw?.foxyMode,
     toolOrder,
     bookmarks,
@@ -891,6 +899,7 @@ function sendProgress(slug, payload) {
 // both would fight over the shared `.part` temp path and the read/modify/write
 // of the registry, corrupting state.
 const installsInFlight = new Set();
+const repairsInFlight = new Set();
 
 async function installOrUpdate(slug, opts = {}) {
   if (installsInFlight.has(slug)) {
@@ -999,6 +1008,13 @@ async function installOrUpdateInner(slug, { force = false, tag: explicitTag } = 
     }
     // Validate permissions before replacing a working binary, then commit on
     // the same filesystem so readers never observe a partial download.
+    if (repairsInFlight.has(slug)) {
+      const latest = readRegistry()[slug];
+      if (current?.source !== 'managed' || latest?.source !== 'managed'
+          || latest.path !== current.path || latest.tag !== tag || current.tag !== tag) {
+        throw new Error('Installation changed during repair. Please try again.');
+      }
+    }
     await fsp.rename(tmp, finalPath);
     unblockExe(finalPath);
 
@@ -1615,6 +1631,55 @@ function buildLaunchEnv() {
 
 // ---------- scan ----------
 
+const updateNotificationsInFlight = new Set();
+
+function notifyProgramUpdates(rows) {
+  // Scans already resolve compatible releases and respect version pins. Keep
+  // notification work local, optional, and independent of scan success.
+  const pendingKeys = [];
+  try {
+    const cfg = readConfig();
+    if (!cfg.updateNotifications || mainWindow?.isFocused() || !Notification.isSupported()) return;
+    const seen = new Set(cfg.notifiedUpdateTags || []);
+    const updates = new Map();
+    for (const row of rows) {
+      if (!row.hasUpdate || !isValidSlug(row.slug) || !isValidTag(row.latestTag)) continue;
+      const key = `${row.slug}@${row.latestTag}`;
+      if (!seen.has(key) && !updateNotificationsInFlight.has(key)) updates.set(key, row);
+    }
+    if (!updates.size) return;
+    pendingKeys.push(...updates.keys());
+    for (const key of pendingKeys) updateNotificationsInFlight.add(key);
+    let failed = false;
+    const notification = new Notification({
+      title: 'Cove Nexus updates available',
+      body: Array.from(updates.values(), row => `${slugToDisplayName(row.slug)} (${row.latestTag})`).join(', '),
+    });
+    notification.on('click', () => { try { showMainWindow(); } catch {} });
+    notification.once('failed', () => {
+      failed = true;
+      try {
+        const latest = readConfig();
+        latest.notifiedUpdateTags = (latest.notifiedUpdateTags || []).filter(key => !updates.has(key));
+        writeConfig(latest);
+      } catch { /* Keep backend failures from escaping the notification callback. */ }
+      finally {
+        for (const key of pendingKeys) updateNotificationsInFlight.delete(key);
+      }
+    });
+    notification.show();
+    if (failed) return;
+    // Store all announced tags so a restart or an older cached release cannot
+    // repeat a notification. Re-read to preserve intervening settings or alerts.
+    const latest = readConfig();
+    latest.notifiedUpdateTags = [...new Set([...(latest.notifiedUpdateTags || []), ...pendingKeys])];
+    writeConfig(latest);
+  } catch { /* Native notifications may be unavailable without a desktop backend. */ }
+  finally {
+    for (const key of pendingKeys) updateNotificationsInFlight.delete(key);
+  }
+}
+
 function isValidTag(tag) {
   return typeof tag === 'string' && /^v\d/.test(tag);
 }
@@ -1741,6 +1806,7 @@ ipcMain.handle('cove:config:get', () => {
     startMinimized: !!cfg.startMinimized,
     launchOnStartup: !!cfg.launchOnStartup,
     closeAfterLaunch: !!cfg.closeAfterLaunch,
+    updateNotifications: !!cfg.updateNotifications,
     foxyMode: !!cfg.foxyMode,
     toolOrder: Array.isArray(cfg.toolOrder) ? cfg.toolOrder : [],
     bookmarks: Array.isArray(cfg.bookmarks) ? cfg.bookmarks : [],
@@ -1755,6 +1821,7 @@ ipcMain.handle('cove:config:setPreferences', (_e, prefs = {}) => {
   if (typeof prefs.startMinimized === 'boolean')  cfg.startMinimized  = prefs.startMinimized;
   if (typeof prefs.launchOnStartup === 'boolean') cfg.launchOnStartup = prefs.launchOnStartup;
   if (typeof prefs.closeAfterLaunch === 'boolean') cfg.closeAfterLaunch = prefs.closeAfterLaunch;
+  if (typeof prefs.updateNotifications === 'boolean') cfg.updateNotifications = prefs.updateNotifications;
   if (typeof prefs.foxyMode === 'boolean') cfg.foxyMode = prefs.foxyMode;
   // Renderer-driven UX prefs. Validate shape so a malformed renderer
   // can't write garbage that breaks subsequent reads.
@@ -1778,6 +1845,7 @@ ipcMain.handle('cove:config:setPreferences', (_e, prefs = {}) => {
     startMinimized: cfg.startMinimized,
     launchOnStartup: cfg.launchOnStartup,
     closeAfterLaunch: cfg.closeAfterLaunch,
+    updateNotifications: !!cfg.updateNotifications,
     toolOrder: Array.isArray(cfg.toolOrder) ? cfg.toolOrder : [],
     bookmarks: Array.isArray(cfg.bookmarks) ? cfg.bookmarks : [],
     theme: cfg.theme === 'light' ? 'light' : 'dark',
@@ -1878,6 +1946,7 @@ ipcMain.handle('cove:scan', async (_e, opts = {}) => {
     } catch {}
   }
 
+  if (checkUpdates) notifyProgramUpdates(rows);
   return { programsRoot: readConfig().programsRoot, installed: rows, rateLimitedUntil: rateLimitUntil };
 });
 
@@ -1908,6 +1977,38 @@ ipcMain.handle('cove:update', async (_e, slug) => {
     return res;
   }
   catch (err) { return { ok: false, error: String(err?.message || err) }; }
+});
+
+ipcMain.handle('cove:repair', async (_e, slug) => {
+  if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
+  if (repairsInFlight.has(slug)) return { ok: false, error: 'A repair is already in progress.' };
+  const active = () => ['running', 'launching'].includes(processRegistry.get(slug)?.status);
+  if (active()) return { ok: false, error: 'Close the program before repairing it.' };
+  if (readRegistry()[slug]?.source !== 'managed') return { ok: false, error: 'Only managed installs can be repaired.' };
+  reconcilePrograms();
+  const info = { ...readRegistry()[slug] };
+  if (info?.source !== 'managed') return { ok: false, error: 'Only managed installs can be repaired.' };
+  if (!isValidTag(info.tag)) return { ok: false, error: 'The installed release tag is unknown.' };
+  repairsInFlight.add(slug);
+  try {
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'question', title: 'Repair / reinstall',
+      message: `Repair / reinstall ${slug} (${info.tag})?`,
+      detail: 'Download the installed release again and replace its binary. Your settings and version pin will be kept.',
+      buttons: ['Cancel', 'Repair / reinstall'], defaultId: 0, cancelId: 0,
+    });
+    if (response !== 1) return { ok: false, cancelled: true };
+    const current = readRegistry()[slug];
+    if (active()) return { ok: false, error: 'Close the program before repairing it.' };
+    if (current?.source !== 'managed' || current.path !== info.path || current.tag !== info.tag) {
+      return { ok: false, error: 'Installation changed. Please try again.' };
+    }
+    return await installOrUpdate(slug, { force: true, tag: info.tag });
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  } finally {
+    repairsInFlight.delete(slug);
+  }
 });
 
 // ── Process registry ──────────────────────────────────────────────────────
@@ -1981,6 +2082,7 @@ ipcMain.handle('cove:process:focus', (_e, slug) => {
 
 ipcMain.handle('cove:launch', async (_e, slug, rawOpenMode) => {
   if (!isValidSlug(slug)) return { ok: false, error: 'invalid slug' };
+  if (repairsInFlight.has(slug)) return { ok: false, error: 'Wait for the repair to finish before launching.' };
   let openMode = rawOpenMode === 'tab-web' ? 'tab-web' : 'external';
   if (isLegacyClone(slug)) {
     return { ok: false, error: 'This install is from an older version. Click Update to reinstall as a binary.' };

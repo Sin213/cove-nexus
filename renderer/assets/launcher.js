@@ -17,6 +17,7 @@
 
   let state = {
     filter: 'all',
+    search: '',
     busy: {},
     operationRevision: {},
     progress: {},
@@ -514,7 +515,10 @@
   }
 
   function filtered() {
+    const query = state.search.trim().toLowerCase();
     const list = window.PROGRAMS.filter(p => {
+      if (query && ![p.name, p.slug, p.desc, p.description].some(value =>
+        typeof value === 'string' && value.toLowerCase().includes(query))) return false;
       if (state.filter === 'installed' && !isInstalled(p)) return false;
       if (state.filter === 'notinstalled' && isInstalled(p)) return false;
       if (state.filter === 'updates' && !hasUpdate(p)) return false;
@@ -704,7 +708,9 @@
   let _statusRenderingGridOnly = false;
   function render() {
     const list = filtered();
-    if (list.length === 0 && state.filter === 'cat-bookmarks') {
+    if (list.length === 0 && state.search.trim()) {
+      grid.innerHTML = '<div class="grid-empty">No programs match your search in this view. Clear the search or choose another category.</div>';
+    } else if (list.length === 0 && state.filter === 'cat-bookmarks') {
       grid.innerHTML = '<div class="grid-empty">Star a tool to bookmark it.</div>';
     } else {
       grid.innerHTML = list.map(card).join('');
@@ -1103,6 +1109,9 @@
       });
       if (installed) {
         items.push({ label: 'Show install folder', onClick: () => coveAPI.revealInstall(prog.slug) });
+        if (prog.source === 'managed') {
+          items.push({ label: 'Repair / reinstall', onClick: () => doRepair(prog) });
+        }
         items.push({ label: 'Uninstall', danger: true, onClick: () => doUninstall(prog) });
       }
     }
@@ -1110,10 +1119,19 @@
       `<button data-i="${i}" style="all:unset;cursor:pointer;display:block;width:100%;padding:8px 12px;font-size:0.78125rem;color:${it.danger ? '#ff6b6b' : 'var(--text)'};border-radius:6px;">${escapeAttr(it.label)}</button>`
     ).join('');
     menu.style.cssText = 'position:fixed;z-index:70;background:var(--bg-deep);border:1px solid var(--border-strong);border-radius:10px;padding:4px;min-width:200px;box-shadow:0 20px 40px -16px var(--shadow-strong);';
+    const margin = 8;
+    const availableWidth = Math.max(0, window.innerWidth - margin * 2);
+    menu.style.maxWidth = `${availableWidth}px`;
+    menu.style.minWidth = `${Math.min(200, availableWidth)}px`;
+    menu.style.maxHeight = `${Math.max(0, window.innerHeight - margin * 2)}px`;
+    menu.style.overflowY = 'auto';
     document.body.appendChild(menu);
     const r = anchor.getBoundingClientRect();
-    menu.style.top = `${Math.min(window.innerHeight - 220, r.bottom + 6)}px`;
-    menu.style.left = `${Math.min(window.innerWidth - 220, r.right - 200)}px`;
+    const size = menu.getBoundingClientRect();
+    const top = r.bottom + 6 + size.height <= window.innerHeight - margin
+      ? r.bottom + 6 : r.top - size.height - 6;
+    menu.style.top = `${Math.max(margin, Math.min(top, window.innerHeight - size.height - margin))}px`;
+    menu.style.left = `${Math.max(margin, Math.min(r.right - size.width, window.innerWidth - size.width - margin))}px`;
     menu.addEventListener('click', (e) => {
       const b = e.target.closest('button[data-i]');
       if (!b) return;
@@ -1125,6 +1143,25 @@
       const close = (ev) => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', close); } };
       document.addEventListener('click', close);
     }, 0);
+  }
+
+  async function doRepair(prog) {
+    if (!IS_DESKTOP || !beginAction(prog.slug, 'installing')) return { ok: false, skipped: true };
+    render();
+    try {
+      const res = await coveAPI.repair(prog.slug);
+      if (res?.cancelled) return { ok: false, cancelled: true };
+      if (!res?.ok) throw new Error(res?.error || 'repair failed');
+      toast(`${prog.name} repaired`);
+      return { ok: true };
+    } catch (e) {
+      toast(`Repair failed: ${e.message}`, 'error');
+      return { ok: false, error: e.message };
+    } finally {
+      state.busy[prog.slug] = null;
+      await rescan();
+      render();
+    }
   }
 
   async function doChangePath(prog) {
@@ -1147,6 +1184,19 @@
       render();
     }
   }
+
+  const programSearch = document.getElementById('program-search');
+  programSearch?.addEventListener('input', () => {
+    state.search = programSearch.value;
+    render();
+  });
+  programSearch?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    e.stopPropagation();
+    programSearch.value = '';
+    state.search = '';
+    render();
+  });
 
   document.querySelectorAll('#nav-library button, #nav-categories button').forEach(b => {
     b.addEventListener('click', () => {
@@ -1684,11 +1734,13 @@
       const prefLOS   = document.getElementById('pref-launch-on-startup');
       const prefNote  = document.getElementById('pref-launch-note');
       const prefCAL  = document.getElementById('pref-close-after-launch');
+      const prefUpdates = document.getElementById('pref-update-notifications');
       const prefFoxy = document.getElementById('pref-foxy-mode');
       if (prefMTT)  prefMTT.checked  = !!cfg.minimizeToTray;
       if (prefSM)   prefSM.checked   = !!cfg.startMinimized;
       if (prefLOS)  prefLOS.checked  = !!cfg.launchOnStartup;
       if (prefCAL)  prefCAL.checked  = !!cfg.closeAfterLaunch;
+      if (prefUpdates) prefUpdates.checked = !!cfg.updateNotifications;
       if (prefFoxy) prefFoxy.checked = !!cfg.foxyMode;
       if (prefLOS && cfg.platform === 'linux') {
         prefLOS.disabled = false;
@@ -1707,6 +1759,7 @@
   document.getElementById('pref-start-minimized')?.addEventListener('change',  (e) => savePrefs({ startMinimized: e.target.checked }));
   document.getElementById('pref-launch-on-startup')?.addEventListener('change', (e) => savePrefs({ launchOnStartup: e.target.checked }));
   document.getElementById('pref-close-after-launch')?.addEventListener('change', (e) => savePrefs({ closeAfterLaunch: e.target.checked }));
+  document.getElementById('pref-update-notifications')?.addEventListener('change', (e) => savePrefs({ updateNotifications: e.target.checked }));
   document.getElementById('pref-foxy-mode')?.addEventListener('change', (e) => {
     setFoxyMode(e.target.checked);
     savePrefs({ foxyMode: e.target.checked });

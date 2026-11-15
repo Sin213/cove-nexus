@@ -160,10 +160,11 @@ function harness(overrides = {}) {
   assert(source.includes(marker), 'test startup hook matches renderer entry point');
   vm.runInContext(source.replace(marker, `  globalThis.renderer = {
     state, init, rescan, beginAction, doInstall, doUpdate, doUninstall, doChangePath, doUpdateAll, isInstalled, hasUpdate,
-    card, render, doLaunch, renderToolSession, doRecoverTab, openPinModal, discoverAndMerge, doRefresh
+    card, render, doLaunch, renderToolSession, doRecoverTab, openPinModal, discoverAndMerge, doRefresh,
+    filtered, reorderTo, toggleBookmark, openCardMenu, doRepair, refreshSettingsPaths
   };\n})();`), context);
   return {
-    ...context.renderer, api, window: context.window, get, subscriptions, frames, errors,
+    ...context.renderer, api, window: context.window, body: context.document.body, get, subscriptions, frames, errors,
     observers: () => observers,
     flush: () => { const ready = frames.splice(0); ready.forEach(fn => fn()); },
     messages: () => get('toast-host').children.map(child => child.textContent),
@@ -176,6 +177,138 @@ const deferred = () => {
   return {promise, resolve};
 };
 const program = slug => ({slug, name: slug, icon: 'upscale', version: '1.0.0'});
+
+test('search matches name, slug and description case-insensitively within categories and bookmarks', () => {
+  const h = harness();
+  h.window.PROGRAMS = [
+    {...program('cove-a'), name: 'Audio Editor', category: 'cat-media'},
+    {...program('cove-b'), desc: 'Edit AUDIO files', category: 'cat-utils'},
+    {...program('cove-audio'), category: 'cat-media'},
+  ];
+  const input = h.get('program-search');
+  input.value = ' AuDiO ';
+  input.listeners.get('input')();
+  assert.deepEqual(Array.from(h.filtered(), p => p.slug), ['cove-a', 'cove-b', 'cove-audio']);
+  h.state.filter = 'cat-media';
+  assert.deepEqual(Array.from(h.filtered(), p => p.slug), ['cove-a', 'cove-audio']);
+  h.toggleBookmark(h.window.PROGRAMS[2]);
+  assert.deepEqual(Array.from(h.filtered(), p => p.slug), ['cove-audio', 'cove-a']);
+  h.state.filter = 'cat-bookmarks';
+  assert.deepEqual(Array.from(h.filtered(), p => p.slug), ['cove-audio']);
+  input.value = 'no match';
+  input.listeners.get('input')();
+  assert.equal(h.filtered().length, 0);
+  assert.match(h.get('grid').innerHTML, /No programs match.*Clear.*search/i);
+  let stopped = false;
+  input.listeners.get('keydown')({key: 'Escape', stopPropagation() { stopped = true; }});
+  assert.equal(input.value, '');
+  assert.equal(stopped, true);
+  assert.deepEqual(Array.from(h.filtered(), p => p.slug), ['cove-audio']);
+});
+
+test('reordering search results preserves hidden positions and bookmark precedence', () => {
+  const h = harness();
+  h.window.PROGRAMS = ['a', 'b', 'c', 'd', 'e'].map(s => ({...program(`cove-${s}`),
+    description: ['a', 'c', 'e'].includes(s) ? 'needle' : '', category: 'cat-media'}));
+  h.state.toolOrder = h.window.PROGRAMS.map(p => p.slug);
+  h.state.filter = 'cat-media';
+  h.get('program-search').value = 'needle';
+  h.get('program-search').listeners.get('input')();
+  h.reorderTo('cove-e', 'cove-a', true);
+  assert.deepEqual(Array.from(h.state.toolOrder), ['cove-e', 'cove-b', 'cove-a', 'cove-d', 'cove-c']);
+  h.toggleBookmark(h.window.PROGRAMS[2]);
+  assert.deepEqual(Array.from(h.filtered(), p => p.slug), ['cove-c', 'cove-e', 'cove-a']);
+  h.reorderTo('cove-a', 'cove-e', true);
+  assert.equal(new Set(h.state.toolOrder).size, 5);
+  assert.equal(h.state.toolOrder[1], 'cove-b');
+  assert.equal(h.state.toolOrder[3], 'cove-d');
+  h.state.search = '';
+  assert.equal(h.filtered()[0].slug, 'cove-c');
+});
+
+test('card menu offers repair only for managed installations', () => {
+  const h = harness();
+  const p = {...program('cove-editor'), source: 'managed'};
+  h.state.onDisk.add(p.slug);
+  h.openCardMenu(element(), p);
+  assert.match(h.body.children.at(-1).innerHTML, /Repair \/ reinstall/);
+  p.source = 'adopted';
+  h.openCardMenu(element(), p);
+  assert.doesNotMatch(h.body.children.at(-1).innerHTML, /Repair \/ reinstall/);
+  p.source = 'managed';
+  h.state.onDisk.clear();
+  h.openCardMenu(element(), p);
+  assert.doesNotMatch(h.body.children.at(-1).innerHTML, /Repair \/ reinstall/);
+});
+
+test('card menu uses measured dimensions to fit below, flip above, or scroll inside a short viewport', () => {
+  const cases = [
+    {viewport: [800, 600], menu: [260, 344], anchor: {top: 60, bottom: 90, right: 400}, top: 96, left: 140},
+    {viewport: [800, 600], menu: [300, 360], anchor: {top: 480, bottom: 510, right: 780}, top: 114, left: 480},
+    {viewport: [240, 180], menu: [320, 420], anchor: {top: 50, bottom: 80, right: 15}, top: 8, left: 8},
+  ];
+  for (const scenario of cases) {
+    const h = harness();
+    [h.window.innerWidth, h.window.innerHeight] = scenario.viewport;
+    const p = {...program('cove-editor'), source: 'managed'};
+    h.state.onDisk.add(p.slug);
+    let measured = false;
+    h.body.appendChild = menu => {
+      h.body.children.push(menu);
+      menu.getBoundingClientRect = () => {
+        measured = true;
+        assert(h.body.children.includes(menu), 'measure after inserting the menu');
+        return {width: Math.min(scenario.menu[0], parseFloat(menu.style.maxWidth) || Infinity),
+          height: Math.min(scenario.menu[1], parseFloat(menu.style.maxHeight) || Infinity)};
+      };
+    };
+    h.openCardMenu({getBoundingClientRect: () => scenario.anchor}, p);
+    const menu = h.body.children.at(-1);
+    assert.equal(measured, true);
+    assert.equal(parseFloat(menu.style.top), scenario.top);
+    assert.equal(parseFloat(menu.style.left), scenario.left);
+    assert.equal(parseFloat(menu.style.maxHeight), h.window.innerHeight - 16);
+    assert.equal(menu.style.overflowY, 'auto');
+    const rect = menu.getBoundingClientRect();
+    assert(parseFloat(menu.style.top) + rect.height <= h.window.innerHeight - 8);
+    assert(parseFloat(menu.style.left) + rect.width <= h.window.innerWidth - 8);
+    assert.match(menu.innerHTML, /Uninstall/);
+  }
+});
+
+test('renderer repair guards duplicate actions, preserves version/pin and reports cancellation or failure', async () => {
+  for (const result of [{ok: true}, {ok: false, cancelled: true}, {ok: false, error: 'checksum mismatch'}]) {
+    const done = deferred();
+    let calls = 0;
+    const h = harness({repair: () => { calls++; return done.promise; }, scan: async () => { throw new Error('offline'); }});
+    const p = {...program('cove-editor'), source: 'managed', pinnedTag: 'v1.0.0'};
+    h.window.PROGRAMS = [p];
+    h.state.onDisk.add(p.slug);
+    const pending = h.doRepair(p);
+    assert.equal((await h.doRepair(p)).skipped, true);
+    assert.equal(calls, 1);
+    done.resolve(result);
+    const actual = await pending;
+    assert.equal(actual.ok, result.ok);
+    assert.equal(h.state.busy[p.slug], null);
+    assert.equal(p.version, '1.0.0');
+    assert.equal(p.pinnedTag, 'v1.0.0');
+    assert.equal(h.isInstalled(p), true);
+    if (result.error) assert(h.messages().some(message => /Repair failed: checksum mismatch/.test(message)));
+    if (result.cancelled) assert(!h.messages().some(message => /repaired|Repair failed/.test(message)));
+  }
+});
+
+test('Settings loads and saves the optional notification preference', async () => {
+  const patches = [];
+  const h = harness({config: {get: async () => ({updateNotifications: true}),
+    setPreferences: async patch => { patches.push(patch); return {ok: true}; }}});
+  await h.refreshSettingsPaths();
+  const toggle = h.get('pref-update-notifications');
+  assert.equal(toggle.checked, true);
+  await toggle.listeners.get('change')({target: {checked: false}});
+  assert.deepEqual(JSON.parse(JSON.stringify(patches)), [{updateNotifications: false}]);
+});
 
 async function statusHarness(slugs = ['cove-a', 'cove-b', 'cove-c', 'cove-d']) {
   const h = harness();
