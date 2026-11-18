@@ -167,36 +167,6 @@ Every shipped binary (AppImage, .deb, Setup.exe, Portable.exe) gets a matching `
 
 Pull requests and branch pushes run lint and tests on Linux and Windows. Tag releases must pass the same checks before either platform builds. The finalizer requires all four platform artifacts, `latest.yml`, `latest-linux.yml`, and a checksum sidecar for every asset; missing, empty, or unfinished assets fail the release. CI sets the release notes and leaves the release as a draft to publish by hand.
 
-### Project layout
-
-```
-main.js                             Electron main process, IPC handlers, auto-updater
-preload.js                          contextBridge exposing coveAPI to the renderer
-lib/
-  network.js                        HTTPS requests, GitHub request queue + cache, downloads
-  reconcile.js                      Programs-folder scan and adoption
-  install-workspace.js              Per-install temp folder + checksum handling
-  hosted-view.js                    Foxy Mode view isolation, navigation, permissions
-  tabweb.js                         Foxy Mode tab lifecycle rules
-  downloads.js                      Save paths for Foxy tab downloads
-  open-mode.js                      Embedded vs external launch choice
-  processes.js                      Child process diagnostics
-  self-update.js                    Self-update restart policy
-renderer/
-  index.html                        App shell + settings modal
-  assets/
-    programs.js                     Static program registry (icons, categories, descriptions)
-    launcher.js                     Renderer logic (grid, filters, install/launch/update, settings)
-    cove_icon.png                   App icon
-    cove-video-editor-preview.png   Featured-banner screenshot
-build/
-  icon.png                          Packaging icon (512×512)
-  afterAllArtifactBuild.js          Writes a .sha256 sidecar per build artifact
-  postReleaseSidecars.js            Uploads latest*.yml sidecars and finalizes the release
-  releaseValidation.js              Required release asset checks
-test/                               Node test suite (npm test)
-.github/workflows/                  checks.yml (lint + tests), release.yml (tag builds)
-```
 
 ### Keyboard shortcuts
 
