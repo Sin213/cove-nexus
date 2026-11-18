@@ -2,7 +2,7 @@
 
 **Install, launch, and update every Cove tool from a single window.**
 
-![Cove Nexus](docs/screenshot.png)
+https://github.com/user-attachments/assets/56f60194-8609-4ceb-8b84-86e650f57024
 
 Cove Nexus is a desktop launcher for the [Sin213](https://github.com/Sin213) fleet of Cove tools (upscaler, compressor, PDF kit, meme maker, video editor, and more). Browse the whole collection, install any tool with one click, launch it, and keep it up to date — all from one place.
 
@@ -23,7 +23,13 @@ chmod +x Cove-Nexus-*.AppImage
 ./Cove-Nexus-*.AppImage
 ```
 
-The AppImage is self-contained — no installation step, no dependencies to manage.
+The AppImage is self-contained - no installation step, no dependencies to manage.
+
+On Debian/Ubuntu you can use the `.deb` instead:
+
+```bash
+sudo apt install ./Cove-Nexus-*-amd64.deb
+```
 
 ### Windows
 
@@ -65,7 +71,7 @@ Two options from the [Releases](https://github.com/Sin213/cove-nexus/releases/la
 - **GitHub rate-limit aware** - transparent 5-minute cache, `X-RateLimit-*` backoff, cached data reused for up to 7 days when GitHub is down or rate-limited, and an optional PAT in Settings bumps the limit from 60/hr to 5000/hr.
 - **Themeable** — light + dark themes, seven accent colors, three densities, two chrome modes (`Ctrl+,` for the Tweaks panel).
 - **UI zoom** - `Ctrl/Cmd +` / `-` / `0` scales the whole interface up, down, or back to default.
-- **Cross-platform** — Linux AppImage, Windows NSIS installer, Windows portable `.exe`.
+- **Cross-platform** - Linux AppImage and `.deb`, Windows NSIS installer, Windows portable `.exe`.
 
 ---
 
@@ -130,6 +136,16 @@ The static registry includes these ten tools by default. Any other `cove-*` repo
 | [cove-gif-maker](https://github.com/Sin213/cove-gif-maker) | Clips → pixel-perfect GIFs |
 | [cove-video-editor](https://github.com/Sin213/cove-video-editor) | Keyboard-driven timeline editor |
 
+Auto-discovery currently adds these as well:
+
+| Tool | What it does |
+|---|---|
+| [cove-download-manager](https://github.com/Sin213/cove-download-manager) | Multi-connection download manager built on aria2 |
+| [cove-file-toolkit](https://github.com/Sin213/cove-file-toolkit) | File search, disk usage, and bulk rename in one app |
+| [cove-image-lab](https://github.com/Sin213/cove-image-lab) | Two-image comparison and inspection |
+| [cove-image-viewer](https://github.com/Sin213/cove-image-viewer) | Image viewer for 60+ formats |
+| [cove-screen-recorder](https://github.com/Sin213/cove-screen-recorder) | Region / screen / window recorder to MP4 or GIF |
+
 ---
 
 ## Building from source
@@ -189,7 +205,7 @@ test/                               Node test suite (npm test)
 | `Ctrl+,` | Toggle Tweaks panel |
 | `Ctrl/Cmd +` / `-` | Zoom UI in / out |
 | `Ctrl/Cmd 0` | Reset UI zoom |
-| `Esc` | Close Tweaks panel / settings modal |
+| `Esc` | Clear program search / close Tweaks panel / settings modal |
 
 ---
 
