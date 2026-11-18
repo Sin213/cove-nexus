@@ -64,6 +64,31 @@ async function harness(t, { download, filesystem = fs, initial = {} } = {}) {
     repair: slug => handlers.get('cove:repair')(null, slug) };
 }
 
+test('CoveArchive installs and updates using canonical identity and per-asset sha256 sidecars', async t => {
+  const h = await harness(t);
+  const slug = 'CoveArchive';
+  function publish(version) {
+    const name = h.release(slug, { name: `${slug}-${version}-x86_64.AppImage` });
+    h.releases[slug].tag_name = `v${version}`;
+    h.releases[slug].assets[1].name = `${name}.sha256`;
+    return name;
+  }
+  const first = publish('1.0.0');
+  assert.equal((await h.install(slug)).ok, true);
+  assert.equal(h.registry[slug].tag, 'v1.0.0');
+  assert.equal(h.registry[slug].path, path.join(h.root, first));
+  const next = publish('1.0.1');
+  assert.equal((await h.install(slug)).ok, true);
+  assert.equal(h.registry[slug].tag, 'v1.0.1');
+  assert.equal(h.registry[slug].path, path.join(h.root, next));
+  assert.equal(h.registry[slug].source, 'managed');
+  assert.deepEqual(Object.keys(h.registry), [slug]);
+  assert.deepEqual(h.registered, [slug, slug]);
+  assert.equal(h.resolutions.every(r => r.slug === slug), true);
+  assert.deepEqual(await fsp.readdir(h.root), [next]);
+  assert.equal(await fsp.readFile(h.registry[slug].path, 'utf8'), 'binary for CoveArchive');
+});
+
 test('repair replaces the same installed release, preserving pin, registry settings and app settings bytes', async t => {
   const h = await harness(t);
   const slug = 'cove-editor';

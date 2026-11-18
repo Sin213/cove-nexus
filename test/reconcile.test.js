@@ -20,6 +20,46 @@ const art = (version, name) => ({
 const appimage = (v) => art(v, `${SLUG}-${v}-x86_64.AppImage`);
 const existsIn = (...paths) => (p) => paths.includes(p);
 
+test('CoveArchive artifacts match and round-trip to the canonical repo slug', () => {
+  for (const name of [
+    'CoveArchive-1.0.0-Portable.exe',
+    'CoveArchive-1.0.0-Setup.exe',
+    'CoveArchive-1.0.0-x86_64.AppImage',
+    'covearchive_1.0.0_amd64.deb',
+  ]) {
+    assert.deepEqual(matchAsset('CoveArchive', name), { version: '1.0.0' });
+    assert.equal(detectSlugFromFilename(name), 'CoveArchive');
+    assert.equal(matchAsset('CoveArchive', `${name}.sha256`), null);
+    assert.equal(detectSlugFromFilename(`${name}.sha256`), null);
+  }
+});
+
+test('CoveArchive filename detection rejects siblings and path traversal', () => {
+  for (const slug of ['CoveRecomp', 'CoveFocus', 'Coveworks', 'CoveArchive-bot', 'CoveArchiveX', '../CoveArchive', 'CoveArchive/other', 'CoveArchive\\other']) {
+    const name = `${slug}-1.0.0-x86_64.AppImage`;
+    assert.equal(detectSlugFromFilename(name), null);
+    assert.equal(matchAsset('CoveArchive', name), null);
+  }
+});
+
+test('CoveArchive adoption and self-update preserve the canonical registry identity', () => {
+  for (const [platform, suffix] of [['linux', 'x86_64.AppImage'], ['win32', 'Portable.exe']]) {
+    const oldName = `CoveArchive-1.0.0-${suffix}`;
+    const newName = `CoveArchive-1.0.1-${suffix}`;
+    const map = listArtifacts([oldName, newName, `${newName}.sha256`, 'covearchive_9.0.0_amd64.deb'], n => `/programs/${n}`, platform);
+    assert.deepEqual([...map.keys()], ['CoveArchive']);
+    const artifacts = map.get('CoveArchive');
+    assert.equal(artifacts.length, 2);
+    const adopted = reconcile('CoveArchive', artifacts, undefined, existsIn(), platform);
+    assert.deepEqual(adopted.entry, { tag: 'v1.0.1', path: `/programs/${newName}`, source: 'adopted' });
+    const updated = reconcile('CoveArchive', artifacts, { tag: 'v1.0.0', path: `/programs/${oldName}`, source: 'managed' }, existsIn(`/programs/${oldName}`), platform);
+    assert.equal(updated.entry.tag, 'v1.0.1');
+    assert.equal(updated.entry.path, `/programs/${newName}`);
+    assert.equal(updated.entry.source, 'managed');
+    assert.deepEqual(updated.deletions, []);
+  }
+});
+
 test('listArtifactsFromNames groups by slug and skips unparseable names', () => {
   const names = [
     'cove-pdf-editor-1.2.0-x86_64.AppImage',

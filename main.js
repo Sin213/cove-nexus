@@ -8,7 +8,7 @@ const net = require('node:net');
 const crypto = require('node:crypto');
 const { setupPortableMode } = require('./portable');
 const {
-  matchAsset, isNewerSemver,
+  matchAsset, isNewerSemver, isDiscoverableRepoName,
   listArtifactsFromNames, planReconcile,
 } = require('./lib/reconcile');
 const { uniqueDownloadPath } = require('./lib/downloads');
@@ -2701,8 +2701,7 @@ ipcMain.handle('cove:discover', async (_e, opts = {}) => {
     // current platform are also excluded — this gates out scripts, experiments,
     // WIP repos, and platform-specific tools (e.g. Windows-only on Linux).
     const candidates = (repos || [])
-      .filter(r => typeof r?.name === 'string'
-        && /^cove-/i.test(r.name)
+      .filter(r => isDiscoverableRepoName(r?.name)
         && !/bot/i.test(r.name)
         && r.name !== GITHUB_REPO
         && !EXCLUDED_REPOS.has(r.name)
